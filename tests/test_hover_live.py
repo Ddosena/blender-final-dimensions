@@ -2,6 +2,7 @@
 import json
 import math
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -187,16 +188,24 @@ def tick():
             mouse(.025)
         elif step == 5:
             assert result()['diameter'] > .04
-            assert any(t.startswith('e: ') for t in state['labels'])
+            if not any(t.startswith('e: ') for t in state['labels']):
+                # Software-rendered CI may finish the new edit-mode frame later.
+                deadline = state.setdefault('edge_label_deadline', time.monotonic() + 6.0)
+                assert time.monotonic() < deadline, 'Selected-edge label was never drawn'
+                area.tag_redraw()
+                return .2
             pass_case('selected_edge_surface_plane_in_edit_mode')
             bpy.ops.screen.screenshot(filepath=str(ROOT / 'artifacts' / 'hover-section-preview.png'))
             bm = bmesh.from_edit_mesh(obj.data)
+            state['before_edit'] = result()['diameter']
             for v in bm.verts:
                 v.co.x *= 1.4
+                # The cursor is on the front (Y) side: enlarge that direction too.
+                # Unequal scales keep an ellipse for the later cursor-direction check.
+                v.co.y *= 1.15
             bmesh.update_edit_mesh(obj.data)
-            state['before_edit'] = result()['diameter']
         elif step == 6:
-            assert result()['diameter'] > state['before_edit']
+            assert result()['diameter'] > state['before_edit'] * 1.05
             pass_case('live_edit_mesh')
             # Passive listener must let standard keyboard events pass through.
             listener = hover._operators[window.as_pointer()]
