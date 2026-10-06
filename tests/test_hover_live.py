@@ -20,6 +20,7 @@ state = {'step': 0, 'builds': 0, 'draws': 0, 'labels': []}
 original_build = hover.Geometry.from_object
 original_draw = hover._draw_view
 original_text = overlay._text
+original_edge_draw = overlay._draw
 
 
 def build(*args):
@@ -38,9 +39,26 @@ def text(*args):
     state['labels'].append(args[2])
 
 
+def edge_draw():
+    context = bpy.context
+    active = context.view_layer.objects.active
+    state['edge_draw'] = {
+        'step': state['step'],
+        'window': context.window.as_pointer() if context.window else None,
+        'area': context.area.type if context.area else None,
+        'region': context.region.type if context.region else None,
+        'region_data': context.region_data is not None,
+        'object': active.name if active else None,
+        'mode': active.mode if active else None,
+        'visible': active.visible_get(view_layer=context.view_layer) if active else None,
+    }
+    original_edge_draw()
+
+
 hover.Geometry.from_object = build
 hover._draw_view = draw
 overlay._text = text
+overlay._draw = edge_draw
 bpy.context.preferences.view.show_splash = False
 test_temp = ROOT / 'artifacts' / 'runtime-temp'
 test_temp.mkdir(exist_ok=True)
@@ -107,8 +125,8 @@ def finish(error=None):
             'edge_cache': overlay.get(window),
             'projected_edge': None if projected is None else [
                 None if point is None else list(point) for point in projected],
-            'edge_labels_enabled': window.window_manager.final_dimensions_show_overlay
-                if hasattr(window, 'window_manager') else bpy.context.window_manager.final_dimensions_show_overlay,
+            'edge_labels_enabled': bpy.context.window_manager.final_dimensions_show_overlay,
+            'last_edge_draw': state.get('edge_draw'),
             'labels': state['labels'][-12:],
         }
         bpy.ops.screen.screenshot(filepath=str(ROOT / 'artifacts' / 'hover-failure.png'))
