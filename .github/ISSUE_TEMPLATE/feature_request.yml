@@ -1,0 +1,21 @@
+name: Предложить функцию
+description: Описать задачу и желаемое поведение.
+title: "[Предложение] "
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: Какую задачу нужно решить?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Как это должно работать?
+      description: Пример, направление измерения, единицы и действия пользователя.
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Пример или иллюстрация

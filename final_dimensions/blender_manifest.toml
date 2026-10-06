@@ -1,0 +1,10 @@
+schema_version = "1.0.0"
+id = "final_dimensions"
+version = "0.5.0"
+name = "Final Dimensions"
+tagline = "Measure evaluated dimensions and snap to final surfaces"
+maintainer = "Final Dimensions contributors"
+type = "add-on"
+tags = ["3D View", "Mesh"]
+blender_version_min = "4.5.0"
+license = ["SPDX:GPL-3.0-or-later"]

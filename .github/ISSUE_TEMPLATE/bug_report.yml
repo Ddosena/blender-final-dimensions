@@ -1,0 +1,46 @@
+name: Ошибка или несовместимость Blender
+description: Сообщить о проблеме установки, измерения или новой версии Blender.
+title: "[Ошибка] "
+body:
+  - type: input
+    id: blender
+    attributes:
+      label: Версия Blender
+      description: Например, 5.2.2 LTS. Help → About Blender.
+    validations:
+      required: true
+  - type: input
+    id: addon
+    attributes:
+      label: Версия Final Dimensions
+      description: Номер выпуска или версия в Preferences → Add-ons.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Операционная система
+      options:
+        - Windows
+        - macOS
+        - Linux
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Как повторить
+      description: Шаги, режим Object/Edit, модификаторы и их настройки Viewport.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Ожидаемый и фактический результат
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Предупреждение, снимок экрана или небольшой пример
+      description: Можно прикрепить скриншот или архив тестовой сцены. Уберите личные данные и материалы, которые нельзя публиковать.

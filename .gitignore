@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+tools/
+artifacts/
+dist/
+release-assets/
+tests/verify_user_install.py
+*.blend
+*.blend1
+*.log
+*.err
+.DS_Store
+Thumbs.db
+.venv/
