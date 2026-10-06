@@ -96,6 +96,22 @@ def finish(error=None):
     report['status'] = 'FAIL' if error else 'PASS'
     if error:
         report['error'] = error
+        edge = overlay.selected_edge(obj)
+        projected = None if edge is None else [
+            view3d_utils.location_3d_to_region_2d(region, space.region_3d, edge[key])
+            for key in ('a', 'b')]
+        report['diagnostics'] = {
+            'step': state['step'],
+            'region': [region.width, region.height],
+            'selected_edge': edge,
+            'edge_cache': overlay.get(window),
+            'projected_edge': None if projected is None else [
+                None if point is None else list(point) for point in projected],
+            'edge_labels_enabled': window.window_manager.final_dimensions_show_overlay
+                if hasattr(window, 'window_manager') else bpy.context.window_manager.final_dimensions_show_overlay,
+            'labels': state['labels'][-12:],
+        }
+        bpy.ops.screen.screenshot(filepath=str(ROOT / 'artifacts' / 'hover-failure.png'))
     report['builds'] = state['builds']
     report['draws'] = state['draws']
     (ROOT / 'artifacts' / ('hover-live-' + bpy.app.version_string.replace(' ', '-') + '.json')).write_text(
