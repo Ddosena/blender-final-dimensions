@@ -7,13 +7,13 @@ import time
 
 import bpy
 import gpu
-from bpy.props import BoolProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
 from . import overlay, hover
 from .measure import format_length
-from .surface import ScenePicker
+from .snapping import SnapPicker, SUPPORTED_ELEMENTS
 
 
 _states = {}
@@ -24,6 +24,20 @@ _generation = 0
 _INTERVAL = 0.08
 _HANDLE_RADIUS = 12.0
 _SLOTS = ('first', 'second')
+
+
+def _snap_settings(context, invert=False):
+    settings = context.scene.tool_settings
+    enabled = bool(settings.use_snap) != bool(invert)
+    elements = frozenset(settings.snap_elements)
+    source = context.window_manager.final_dimensions_snap_source
+    space = context.space_data
+    filters = tuple(bool(getattr(settings, name, False)) for name in (
+        'use_snap_backface_culling', 'use_snap_selectable', 'use_snap_self',
+        'use_snap_edit', 'use_snap_nonedit'))
+    xray = (bool(space.shading.show_xray), bool(space.shading.show_xray_wireframe),
+            space.shading.type, bool(space.shading.show_backface_culling))
+    return enabled, elements, source, filters, xray, space.clip_start, space.clip_end
 
 
 def _parent():
@@ -99,7 +113,7 @@ class RulerCollection:
         if self.context_key != (context.scene.as_pointer(), context.view_layer.as_pointer()):
             raise ValueError('Scene or view layer changed; start new rulers')
         if self.picker is None:
-            self.picker = ScenePicker(context, epoch)
+            self.picker = SnapPicker(context, epoch)
         else:
             self.picker.refresh(context, epoch)
         if self.epoch == epoch:
@@ -127,10 +141,11 @@ class RulerCollection:
                 self.original = None
         self.recalculate()
 
-    def pick(self, context, epoch, region, rv3d, coordinate, force=False):
+    def pick(self, context, epoch, region, rv3d, coordinate, force=False, snap_invert=False):
         self.refresh(context, epoch)
+        snap_settings = _snap_settings(context, snap_invert)
         key = (coordinate, tuple(v for row in rv3d.perspective_matrix for v in row),
-               region.width, region.height, epoch)
+               region.width, region.height, epoch, snap_settings)
         if not force and key == self.query_key:
             return
         self.query_key = key
@@ -139,8 +154,20 @@ class RulerCollection:
             region, rv3d, coordinate, clamp=max(context.space_data.clip_end, 1.0))
         item = self.selected
         try:
-            self.candidate = self.picker.pick(context, origin, direction)
-            item.message = item.error_message() if self.candidate else 'Move onto a visible mesh surface'
+            if snap_settings[0]:
+                elements = snap_settings[1] & SUPPORTED_ELEMENTS
+                if elements:
+                    self.candidate = self.picker.snap(
+                        context, origin, direction, region, rv3d, coordinate,
+                        elements, snap_settings[2])
+                    message = 'Move near a matching mesh element'
+                else:
+                    self.candidate = None
+                    message = 'Choose Vertex, Edge or Face snapping'
+            else:
+                self.candidate = self.picker.pick(context, origin, direction)
+                message = 'Move onto a visible mesh surface'
+            item.message = item.error_message() if self.candidate else message
         except (ValueError, RuntimeError, ReferenceError) as exc:
             self.candidate = None
             item.message = str(exc)
@@ -277,6 +304,7 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         self._window_pointer = pointer
         self._generation = _generation
         self._mouse = None
+        self._snap_invert = False
         self._last_tick = 0.0
         self._cursor_active = False
         self._state = manager
@@ -324,7 +352,8 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             with context.temp_override(window=context.window, area=area, region=region):
                 coordinate = (self._mouse[0]-region.x, self._mouse[1]-region.y)
                 manager.pick(bpy.context, parent._epoch, region,
-                             area.spaces.active.region_3d, coordinate, force)
+                             area.spaces.active.region_3d, coordinate, force,
+                             self._snap_invert)
         finally:
             parent._measuring = previous
         _redraw(context.window)
@@ -365,8 +394,15 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             return {'CANCELLED'}
         if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'LEFTMOUSE', 'RIGHTMOUSE'}:
             self._mouse = (event.mouse_x, event.mouse_y)
+            self._snap_invert = bool(getattr(event, 'ctrl', False))
+        elif event.type in {'LEFT_CTRL', 'RIGHT_CTRL'}:
+            self._snap_invert = bool(getattr(event, 'ctrl', False))
+            if manager.mode != 'IDLE':
+                self._safe_update(context, force=True)
+                return {'RUNNING_MODAL'}
         elif event.type == 'WINDOW_DEACTIVATE':
             self._mouse = None
+            self._snap_invert = False
             if manager.mode == 'DRAG':
                 return self._cancel_interaction(context)
         if event.type == 'ESC' and event.value == 'PRESS' and manager.mode != 'IDLE':
@@ -652,6 +688,13 @@ def _draw_pixel():
         item = manager.selected
         if (manager.mode != 'IDLE' and item
                 and context.area.as_pointer() == item.area_pointer):
+            candidate = manager.candidate
+            projected = _project(candidate)
+            if projected is not None and candidate.get('snap_kind'):
+                kind = candidate['snap_kind'].replace('_', ' ').title()
+                source = candidate['snap_source'].title()
+                overlay._text(projected.x+12, projected.y-18, source+' · '+kind,
+                              (1., .85, .3, 1.))
             instruction = ('Release to place point' if manager.mode == 'DRAG'
                            else f'Click surface for point {manager.slot+1}')
             overlay._text(18, 24, 'Surface ruler: '+(item.message or instruction)+' · Esc cancel',
@@ -668,6 +711,10 @@ def draw_panel(layout, context):
     remove = row.row(align=True)
     remove.enabled = get(context.window) is not None
     remove.operator(VIEW3D_OT_final_dimensions_ruler_clear.bl_idname, text='', icon='X')
+    box.prop(context.window_manager, 'final_dimensions_snap_source', text='Snap mesh')
+    settings = context.scene.tool_settings
+    box.label(text='Blender snapping: '+('On' if settings.use_snap else 'Off'),
+              icon='SNAP_ON' if settings.use_snap else 'SNAP_OFF')
     manager = collection(context.window)
     if manager is None or not manager.items:
         box.label(text='Two clicks on final surfaces')
@@ -711,6 +758,14 @@ _CLASSES = (VIEW3D_OT_final_dimensions_ruler, VIEW3D_OT_final_dimensions_ruler_c
 
 def register():
     global _registered
+    bpy.types.WindowManager.final_dimensions_snap_source = EnumProperty(
+        name='Snap mesh',
+        description='Geometry used for ruler snapping when the Blender magnet is enabled',
+        items=(('ORIGINAL', 'Original', 'Base mesh before modifiers'),
+               ('FINAL', 'Final', 'Viewport mesh after modifiers'),
+               ('BOTH', 'Both', 'Base mesh and viewport result')),
+        default='BOTH',
+    )
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
     _registered = True
@@ -726,3 +781,4 @@ def unregister():
     _handles.clear()
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
+    del bpy.types.WindowManager.final_dimensions_snap_source

@@ -51,7 +51,7 @@ def main():
         report['checks'].append(name)
 
     for script in ('test_blender', 'test_extra', 'test_direction', 'test_section',
-                   'test_cursor_diameter', 'test_surface'):
+                   'test_cursor_diameter', 'test_surface', 'test_snapping'):
         run(script, ['--background', '--factory-startup', '--python-exit-code', '1',
                      '--python', str(ROOT / 'tests' / (script+'.py'))])
     run('build', ['--factory-startup', '--command', 'extension', 'build',
@@ -62,7 +62,8 @@ def main():
                          '--python', str(ROOT / 'tests/test_install.py')])
     if args.gui:
         for script, prefix in (('test_hover_live', 'hover-live'), ('test_ruler_live', 'ruler-live'),
-                               ('test_multi_ruler_live', 'multi-ruler-live')):
+                               ('test_multi_ruler_live', 'multi-ruler-live'),
+                               ('test_snap_ruler_live', 'snap-ruler-live')):
             result_path = artifacts / f'{prefix}-{blender_version}.json'
             # An old report must never pass a failed new process.
             if result_path.exists():

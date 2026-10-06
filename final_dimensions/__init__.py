@@ -15,7 +15,7 @@ from . import overlay, hover, ruler
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 5, 0),
+    "version": (0, 6, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
     "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
