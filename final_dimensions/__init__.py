@@ -15,7 +15,7 @@ from . import overlay, hover, ruler
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 6, 0),
+    "version": (0, 7, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
     "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
@@ -282,6 +282,24 @@ class VIEW3D_PT_final_dimensions(bpy.types.Panel):
                         ):
                             layout.label(text=line, icon="INFO")
 
+
+class VIEW3D_PT_final_dimensions_object(bpy.types.Panel):
+    bl_label = "Object dimensions"
+    bl_idname = "VIEW3D_PT_final_dimensions_object"
+    bl_parent_id = "VIEW3D_PT_final_dimensions"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Final Dimensions"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.view_layer.objects.active
+        return obj is not None and obj.type == "MESH"
+
+    def draw(self, context):
+        layout = self.layout
+        obj = context.view_layer.objects.active
         layout.label(text="World axes · scene unit scale", icon="ORIENTATION_GLOBAL")
         window = context.window
         if window is None:
@@ -338,6 +356,7 @@ def register():
         default=True,
     )
     bpy.utils.register_class(VIEW3D_PT_final_dimensions)
+    bpy.utils.register_class(VIEW3D_PT_final_dimensions_object)
     overlay.register()
     hover.register()
     ruler.register()
@@ -361,5 +380,6 @@ def unregister():
     overlay.unregister()
     ruler.unregister()
     hover.unregister()
+    bpy.utils.unregister_class(VIEW3D_PT_final_dimensions_object)
     bpy.utils.unregister_class(VIEW3D_PT_final_dimensions)
     del bpy.types.WindowManager.final_dimensions_show_overlay

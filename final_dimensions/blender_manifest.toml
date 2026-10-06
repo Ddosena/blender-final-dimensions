@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "final_dimensions"
-version = "0.6.0"
+version = "0.7.0"
 name = "Final Dimensions"
 tagline = "Measure evaluated dimensions and snap to final surfaces"
 maintainer = "Final Dimensions contributors"

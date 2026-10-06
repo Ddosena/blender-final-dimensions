@@ -63,7 +63,8 @@ def main():
     if args.gui:
         for script, prefix in (('test_hover_live', 'hover-live'), ('test_ruler_live', 'ruler-live'),
                                ('test_multi_ruler_live', 'multi-ruler-live'),
-                               ('test_snap_ruler_live', 'snap-ruler-live')):
+                               ('test_snap_ruler_live', 'snap-ruler-live'),
+                               ('test_cursor_ruler_live', 'cursor-ruler-live')):
             result_path = artifacts / f'{prefix}-{blender_version}.json'
             # An old report must never pass a failed new process.
             if result_path.exists():
