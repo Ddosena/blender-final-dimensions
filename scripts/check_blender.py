@@ -67,7 +67,8 @@ def main():
             # An old report must never pass a failed new process.
             if result_path.exists():
                 result_path.unlink()
-            run(script, ['--factory-startup', '--enable-event-simulate', '--python-exit-code', '1',
+            run(script, ['--factory-startup', '--window-geometry', '0', '0', '1920', '1080',
+                         '--enable-event-simulate', '--python-exit-code', '1',
                          '--python', str(ROOT / 'tests' / (script+'.py'))])
             result = json.loads(result_path.read_text(encoding='utf-8'))
             assert result['status'] == 'PASS', result
