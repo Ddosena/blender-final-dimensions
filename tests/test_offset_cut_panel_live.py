@@ -26,6 +26,8 @@ window = bpy.context.window
 area = next(a for a in window.screen.areas if a.type == 'VIEW_3D')
 area.spaces.active.show_region_ui = True
 ui = next(r for r in area.regions if r.type == 'UI')
+# Default collapsed Appearance adds one row above the ruler controls.
+BUTTON_FROM_TOP = 260
 
 
 def click(x, y):
@@ -57,12 +59,13 @@ def tick():
             except Exception as exc:
                 print('SET CATEGORY FAILED', repr(exc), flush=True)
         elif step == 1:
-            bpy.ops.screen.screenshot(filepath=str(temp / 'panel.png'))
+            bpy.ops.screen.screenshot(filepath=str(ROOT / 'artifacts' /
+                ('offset-cut-panel-'+bpy.app.version_string.replace(' ', '-')+'.png')))
             print('PANEL CATEGORY', ui.active_panel_category, flush=True)
             window.event_simulate(type='MOUSEMOVE', value='NOTHING',
-                                  x=ui.x + ui.width//2, y=ui.y + ui.height - 225)
+                                  x=ui.x + ui.width//2, y=ui.y + ui.height - BUTTON_FROM_TOP)
         elif step == 2:
-            click(ui.x + ui.width//2, ui.y + ui.height - 225)
+            click(ui.x + ui.width//2, ui.y + ui.height - BUTTON_FROM_TOP)
         elif step == 3:
             assert offset_cut._sessions.get(area.as_pointer()) is not None, 'Sidebar button did not launch Offset Cut'
             report['cases'].append('actual Sidebar Pick Face & Preview button launches modal')

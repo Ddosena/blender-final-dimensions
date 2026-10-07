@@ -49,9 +49,11 @@ def dialog():
     assert result == {'RUNNING_MODAL'}, result
 
 
-def ui_event(kind, value, x, top_y, **options):
+def ui_event(kind, value, x, reference_top_y, **options):
+    # The dialog is anchored to the lower-left. Keep the offset from that
+    # edge when Xvfb uses a taller window than the original 900x700 capture.
     window.event_simulate(type=kind, value=value, x=x,
-                          y=window.height - top_y, **options)
+                          y=700 - reference_top_y, **options)
 
 
 def ui_click(x, top_y):

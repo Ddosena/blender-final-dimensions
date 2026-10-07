@@ -20,6 +20,8 @@ bpy.context.preferences.filepaths.temporary_directory = str(TEMP)
 bpy.context.preferences.view.show_splash = False
 REPORT = ROOT / 'artifacts' / f'ruler-style-disable-live-{VERSION}.json'
 state = {'step': 0, 'cases': []}
+BEFORE = ROOT / 'artifacts' / f'ruler-style-popup-open-{VERSION}.png'
+CLOSED = ROOT / 'artifacts' / f'ruler-style-popup-closed-{VERSION}.png'
 
 addon.register()
 window = bpy.context.window
@@ -39,6 +41,15 @@ def finish(error=None):
     bpy.ops.wm.quit_blender()
 
 
+def red_pixel(path, x, bottom_y):
+    image = bpy.data.images.load(str(path), check_existing=False)
+    try:
+        width, _height = image.size
+        return image.pixels[4 * (bottom_y * width + x)]
+    finally:
+        bpy.data.images.remove(image)
+
+
 def tick():
     try:
         step = state['step']
@@ -46,7 +57,7 @@ def tick():
             with bpy.context.temp_override(window=window, area=area, region=region):
                 bpy.ops.wm.call_panel(name='VIEW3D_PT_final_dimensions', keep_open=True)
         elif step == 1:
-            bpy.ops.screen.screenshot(filepath=str(TEMP / 'before-disable.png'))
+            bpy.ops.screen.screenshot(filepath=str(BEFORE))
             assert scene.final_dimensions_ruler_appearance.show_appearance
             state['cases'].append('visible_color_control_in_popup')
         elif step == 2:
@@ -54,17 +65,12 @@ def tick():
             window.event_simulate(type='ESC', value='PRESS', x=100,
                                   y=window.height - 100)
         elif step == 3:
-            screenshot = TEMP / 'closed-before-disable.png'
-            bpy.ops.screen.screenshot(filepath=str(screenshot))
-            image = bpy.data.images.load(str(screenshot), check_existing=False)
-            try:
-                width, height = image.size
-                # A live popup leaves this pixel nearly black; the uncovered
-                # viewport is grey. Read the screenshot before touching RNA.
-                sample = image.pixels[4 * ((height - 1 - 200) * width + 150)]
-                assert sample > .02, ('Popup still covers the viewport', sample)
-            finally:
-                bpy.data.images.remove(image)
+            bpy.ops.screen.screenshot(filepath=str(CLOSED))
+            samples = [(bottom_y, red_pixel(BEFORE, 150, bottom_y),
+                        red_pixel(CLOSED, 150, bottom_y))
+                       for bottom_y in (150, 200, 250, 300, 350, 400)]
+            assert sum(after > before * 1.5 for _, before, after in samples) >= 3, (
+                'Popup still covers the viewport', samples)
             assert scene.final_dimensions_ruler_appearance.show_appearance
         elif step == 4:
             addon.unregister()

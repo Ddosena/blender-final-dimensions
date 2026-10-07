@@ -25,7 +25,7 @@ REPORT = ROOT / 'artifacts' / f'ruler-display-live-{VERSION}.json'
 IMAGE = ROOT / 'artifacts' / f'ruler-display-{VERSION}.png'
 DIALOG_IMAGE = ROOT / 'artifacts' / f'ruler-display-dialog-{VERSION}.png'
 state = {'step': 0, 'lines': [], 'labels': [], 'cases': []}
-BUTTON_TOP = 270 if bpy.app.version < (5, 0, 0) else 325
+BUTTON_FROM_BOTTOM = 630 if bpy.app.version < (5, 0, 0) else 575
 
 addon.register()
 window = bpy.context.window
@@ -85,14 +85,23 @@ drawing.line = record_line
 overlay._text = record_text
 
 
-def ui_event(kind, value, x, top_y):
-    window.event_simulate(type=kind, value=value, x=x, y=window.height - top_y)
+def ui_event(kind, value, x, bottom_y):
+    window.event_simulate(type=kind, value=value, x=x, y=bottom_y)
 
 
-def click(x, top_y):
-    ui_event('MOUSEMOVE', 'NOTHING', x, top_y)
-    ui_event('LEFTMOUSE', 'PRESS', x, top_y)
-    ui_event('LEFTMOUSE', 'RELEASE', x, top_y)
+def click(x, bottom_y):
+    ui_event('MOUSEMOVE', 'NOTHING', x, bottom_y)
+    ui_event('LEFTMOUSE', 'PRESS', x, bottom_y)
+    ui_event('LEFTMOUSE', 'RELEASE', x, bottom_y)
+
+
+def red_pixel(path, x, bottom_y):
+    image = bpy.data.images.load(str(path), check_existing=False)
+    try:
+        width, _height = image.size
+        return image.pixels[4 * (bottom_y * width + x)]
+    finally:
+        bpy.data.images.remove(image)
 
 
 def finish(error=None):
@@ -126,10 +135,13 @@ def tick():
             bpy.ops.screen.screenshot(filepath=str(IMAGE))
             state['cases'].append('native_panel_screenshot')
         elif step == 2:
-            click(110, BUTTON_TOP)
+            click(110, BUTTON_FROM_BOTTOM)
         elif step == 3:
             bpy.ops.screen.screenshot(filepath=str(DIALOG_IMAGE))
-            ui_event('ESC', 'PRESS', 110, BUTTON_TOP)
+            before = red_pixel(IMAGE, 330, 480)
+            after = red_pixel(DIALOG_IMAGE, 330, 480)
+            assert after < before * .7, ('Label & Color dialog did not open', before, after)
+            ui_event('ESC', 'PRESS', 110, BUTTON_FROM_BOTTOM)
         elif step == 4:
             assert first.label == 'Основная часть'
             assert first.precision == 2
@@ -137,7 +149,7 @@ def tick():
             assert first.first is first_original
             assert math.isclose(first.distance, first_distance, abs_tol=1e-9)
             state['cases'].append('sidebar_button_dialog_cancel_preserves_style')
-            ui_event('ESC', 'PRESS', 110, BUTTON_TOP)
+            ui_event('ESC', 'PRESS', 110, BUTTON_FROM_BOTTOM)
         elif step == 5:
             finish()
             return None
