@@ -63,7 +63,9 @@ def main():
                    'test_cursor_diameter', 'test_surface', 'test_snapping',
                    'test_vertex_tracking', 'test_vertex_tracking_native_ops',
                    'test_vertex_ruler_deferred',
-                   'test_loop_offset', 'test_ruler_style'):
+                   'test_loop_offset', 'test_ruler_style',
+                   'test_loop_overlay_suppression', 'test_ruler_lineage',
+                   'test_ruler_history', 'test_ruler_delete'):
         run(script, ['--background', '--factory-startup', '--python-exit-code', '1',
                      '--python', str(ROOT / 'tests' / (script+'.py'))])
         if script == 'test_loop_offset':

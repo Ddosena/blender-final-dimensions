@@ -17,6 +17,11 @@ from . import drawing
 
 
 _preview_handles = set()
+_preview_windows = {}
+
+
+def preview_active(window):
+    return window is not None and window.as_pointer() in _preview_windows.values()
 
 
 def _clear_preview(operator=None):
@@ -24,7 +29,11 @@ def _clear_preview(operator=None):
     if operator is not None and handle is None:
         return
     handles = (handle,) if handle is not None else tuple(_preview_handles)
+    affected_windows = set()
     for current in handles:
+        pointer = _preview_windows.pop(current, None)
+        if pointer is not None:
+            affected_windows.add(pointer)
         try:
             bpy.types.SpaceView3D.draw_handler_remove(current, 'WINDOW')
         except (ReferenceError, RuntimeError, ValueError):
@@ -32,6 +41,11 @@ def _clear_preview(operator=None):
         _preview_handles.discard(current)
     if operator is not None:
         operator._preview_handle = None
+    for window in bpy.context.window_manager.windows:
+        if window.as_pointer() in affected_windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
 
 
 @persistent
@@ -256,6 +270,9 @@ class MESH_OT_final_dimensions_loop_offset(bpy.types.Operator):
             )
             self._preview_handle = handle
             _preview_handles.add(handle)
+            _preview_windows[handle] = context.window.as_pointer()
+            from . import hover
+            hover.clear_window(context.window)
             context.area.tag_redraw()
         try:
             result = context.window_manager.invoke_props_dialog(self, width=340)

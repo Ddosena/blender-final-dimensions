@@ -30,6 +30,25 @@ def _parent():
     return sys.modules[__package__]
 
 
+def temporarily_suppressed(window):
+    """Avoid a second preview while native loop tools or Loop Offset run."""
+    if window is None:
+        return False
+    from . import loop_offset
+    if loop_offset.preview_active(window):
+        return True
+    for operator in window.modal_operators:
+        identifier = getattr(getattr(operator, 'bl_rna', None), 'identifier', '')
+        if not identifier:
+            identifier = getattr(operator, 'bl_idname', '')
+        identifier = str(identifier).lower().replace('_ot_', '.')
+        if identifier in {'mesh.loopcut_slide', 'mesh.loopcut',
+                          'transform.edge_slide', 'transform.vert_slide',
+                          'mesh.final_dimensions_loop_offset'}:
+            return True
+    return False
+
+
 def plane_normal(obj, edge, hit_normal, mode):
     """A visible, user-controlled slice, not an inferred universal tube axis.
 
@@ -78,7 +97,7 @@ def _redraw(window):
 
 
 def get(window, area=None):
-    if window is None:
+    if window is None or temporarily_suppressed(window):
         return None
     value = _results.get(window.as_pointer())
     if value is not None and area is not None and value['area'] != area.as_pointer():
@@ -109,7 +128,8 @@ class Probe:
         target = _viewport_at(window, self.mouse)
         obj = window.view_layer.objects.active
         wm = context.window_manager
-        if (ruler.is_running(window) or not wm.final_dimensions_hover or target is None or obj is None
+        if (temporarily_suppressed(window) or ruler.is_running(window)
+                or not wm.final_dimensions_hover or target is None or obj is None
                 or obj.type != 'MESH' or not obj.visible_get(view_layer=window.view_layer)):
             self.query_key = None
             if _results.pop(pointer, None) is not None:
@@ -305,7 +325,8 @@ def stop():
 def _visible_result():
     from . import ruler
     context = bpy.context
-    if (not _registered or context.window is None or ruler.is_running(context.window) or context.area is None
+    if (not _registered or context.window is None or temporarily_suppressed(context.window)
+            or ruler.is_running(context.window) or context.area is None
             or context.area.type != 'VIEW_3D'
             or not context.window_manager.final_dimensions_hover
             or not context.space_data.overlay.show_overlays):

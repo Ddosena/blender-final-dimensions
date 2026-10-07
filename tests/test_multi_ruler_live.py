@@ -270,17 +270,17 @@ def tick():
             space.overlay.show_overlays = True
             left.modifiers[0].levels = 3
         elif step == 31:
-            assert test['first_item'].first is None and test['first_item'].second
-            assert test['first_item'].distance is None
+            assert test['first_item'].first['anchor']['kind'] == 'WORLD' and test['first_item'].second
+            assert test['first_item'].distance is not None
             same_endpoints(test['second_item'], test['second_after_replace'])
-            passed('topology_invalidates_only_affected_endpoint_and_ruler')
+            passed('topology_freezes_only_affected_endpoint_and_ruler')
             select(0)
             operator('final_dimensions_ruler_endpoint', endpoint=0)
             mouse(left.location)
             click(left.location)
         elif step == 32:
             assert active().first and active().second and manager().mode == 'IDLE'
-            passed('missing_endpoint_can_be_picked_again')
+            passed('frozen_endpoint_can_be_picked_again')
             test['before_transform'] = [endpoints(item) for item in manager().items]
             right.location.x += .01
         elif step == 33:
@@ -332,7 +332,7 @@ def tick():
             addon._on_load_pre(None)
             addon._on_state_reset(None)
             assert not ruler._sessions and not ruler._states
-            passed('load_undo_lifecycle_clears_all_rulers')
+            passed('load_lifecycle_clears_all_rulers')
             addon.unregister()
             assert not ruler._handles and not ruler._sessions and not ruler._states
             assert not hover._operators

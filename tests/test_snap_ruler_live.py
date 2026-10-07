@@ -204,10 +204,11 @@ def tick():
             bevel.segments = 4
         elif step == 13:
             close(manager().selected.first['point'], state['original_end'])
-            assert manager().selected.second is None
-            passed('final_topology_invalidates_only_final_endpoint')
+            assert manager().selected.second['anchor']['kind'] == 'WORLD'
+            passed('final_topology_freezes_only_final_endpoint')
             with bpy.context.temp_override(window=window, area=area, region=region):
                 bpy.ops.view3d.final_dimensions_ruler_select(index=0)
+                bpy.ops.view3d.final_dimensions_ruler_endpoint(endpoint=1)
             wm.final_dimensions_snap_source = 'ORIGINAL'
             mouse(left.location)
         elif step == 14:

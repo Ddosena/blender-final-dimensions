@@ -205,6 +205,31 @@ class SnapPicker(ScenePicker):
             self._original_bounds = {}
         return changed
 
+    def original_vertex_owner(self, context, anchor):
+        if (anchor.get('snap_source') != 'ORIGINAL' or
+                anchor.get('snap_kind') != 'VERTEX' or 'vertex_id' not in anchor):
+            raise ValueError('Not an Original vertex anchor')
+        try:
+            record = self._by_key[tuple(anchor['key'])]
+        except (KeyError, TypeError) as exc:
+            raise ValueError('Anchor object is unavailable') from exc
+        if record['owner_uid'] != anchor['owner_uid']:
+            raise ValueError('Anchor object identity changed')
+        return self._owner(context, record)
+
+    def vertex_lineage(self, context, anchor):
+        return self._vertex_tracker.lineage(
+            self.original_vertex_owner(context, anchor), anchor)
+
+    def bind_descendant(self, context, anchor, index):
+        return self._vertex_tracker.bind(
+            self.original_vertex_owner(context, anchor), index,
+            allow_reassign_ambiguous=True)
+
+    def original_vertices_connected(self, context, anchor, first_index, second_index):
+        return self._vertex_tracker.connected(
+            self.original_vertex_owner(context, anchor), first_index, second_index)
+
     def _feature_geometry(self, context, record, source):
         key = record['key'] if source == 'FINAL' else ('ORIGINAL', *record['key'])
         if key in self._geometry_cache:

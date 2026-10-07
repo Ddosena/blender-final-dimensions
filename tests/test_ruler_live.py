@@ -178,9 +178,9 @@ def tick():
             passed('completed_ruler_follows_object_transform')
             left.modifiers[0].levels = 3
         elif step == 9:
-            assert value().first is None and value().distance is None
+            assert value().first['anchor']['kind'] == 'WORLD' and value().distance is not None
             assert 'topology' in value().message.lower(), value().message
-            passed('topology_change_invalidates_anchors')
+            passed('topology_change_freezes_lost_anchor')
             start()
             mouse(left.location)
             click(left.location)

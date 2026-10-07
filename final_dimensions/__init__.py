@@ -15,7 +15,7 @@ from . import overlay, hover, ruler, ruler_style, loop_offset
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 8, 1),
+    "version": (0, 9, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
     "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
@@ -103,6 +103,7 @@ def _timer_tick():
                 obj is not None
                 and obj.type == "MESH"
                 and obj.mode == "EDIT"
+                and not hover.temporarily_suppressed(window)
                 and bpy.context.window_manager.final_dimensions_show_overlay
                 and any(
                     area.type == "VIEW_3D"
@@ -220,6 +221,19 @@ def _on_state_reset(_dummy):
     overlay.clear()
     hover.invalidate()
     ruler.stop_all()
+    _epoch += 1
+    _restart_timer()
+
+
+@persistent
+def _on_history_reset(_dummy):
+    """Undo/redo may replace mesh IDs, but should not erase measurements."""
+    global _epoch
+    _cache.clear()
+    _draw_interest.clear()
+    overlay.clear()
+    hover.invalidate()
+    ruler.after_history_change()
     _epoch += 1
     _restart_timer()
 
@@ -344,8 +358,8 @@ _HANDLERS = (
     (bpy.app.handlers.load_pre, _on_load_pre),
     (bpy.app.handlers.depsgraph_update_post, _on_depsgraph_update),
     (bpy.app.handlers.load_post, _on_state_reset),
-    (bpy.app.handlers.undo_post, _on_state_reset),
-    (bpy.app.handlers.redo_post, _on_state_reset),
+    (bpy.app.handlers.undo_post, _on_history_reset),
+    (bpy.app.handlers.redo_post, _on_history_reset),
 )
 
 

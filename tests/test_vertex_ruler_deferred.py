@@ -47,8 +47,9 @@ assert abs(item.distance - 2.) < 1e-5
 bpy.ops.object.mode_set(mode='EDIT')
 manager.refresh(bpy.context, 2)
 
-# A canceled native Inset may expose provisional topology during its modal
-# lifetime. Retain the hits and retry at the same epoch after Undo restores it.
+# A native Inset may expose provisional topology during its modal lifetime.
+# Retain the hits and retry at the same epoch after the history callback.
+# Background Undo may leave EditMesh unchanged; this is not a cancel replay test.
 bpy.ops.ed.undo_push(message='before deferred inset')
 assert bpy.ops.mesh.inset(thickness=.15, depth=0) == {'FINISHED'}
 saved_guard = vertex_tracking._may_write_edit_identity
@@ -67,7 +68,7 @@ assert not manager._pending_vertex_resolution
 assert item.first is first and item.second is second
 assert manager.original is original
 assert abs(item.distance - 2.) < 1e-5
-print('PASS deferred native edit cancel retains both endpoints and original', flush=True)
+print('PASS deferred edit retry retains both endpoints and original', flush=True)
 
 # A confirmed Inset must also retry at the same epoch and repair duplicated
 # POINT IDs before the next Object-mode conversion.

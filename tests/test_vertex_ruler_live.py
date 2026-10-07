@@ -111,6 +111,9 @@ def tick():
             bpy.ops.mesh.inset(thickness=.25, depth=0)
             refresh()
         elif step == 5:
+            assert len(manager().items) == 2
+            assert math.isclose(manager().selected.distance, 1.5, abs_tol=1e-5)
+            manager().select(0)
             item = manager().selected
             assert item and math.isclose(item.distance, 2, abs_tol=1e-5), item
             bm = bmesh.from_edit_mesh(obj.data)
@@ -118,6 +121,7 @@ def tick():
             moving = next(v for v in bm.verts if int(v[layer]) == item.first['anchor']['vertex_id'])
             moving.co.x -= .5
             bmesh.update_edit_mesh(obj.data)
+            del moving, layer, bm
             refresh()
         elif step == 6:
             item = manager().selected

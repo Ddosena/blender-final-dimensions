@@ -23,6 +23,7 @@ _registered = False
 _generation = 0
 _INTERVAL = 0.08
 _HANDLE_RADIUS = 12.0
+_LINE_HIT_RADIUS = 8.0
 _DRAG_THRESHOLD = 5.0
 _SLOTS = ('first', 'second')
 
@@ -33,6 +34,45 @@ def _world_hit(point):
     return {'point': point, 'normal': (0., 0., 0.),
             'object_name': '3D Cursor', 'anchor': {'kind': 'WORLD', 'point': point},
             'warnings': ()}
+
+
+def _nearest_screen_ruler(coordinate, segments, active):
+    """Pick a visible complete line; prefer the active ruler when overlapping."""
+    mouse = Vector(coordinate)
+    matches = []
+    for index, first, second in segments:
+        if first is None or second is None:
+            continue
+        a, b = Vector(first), Vector(second)
+        delta = b - a
+        factor = max(0., min(1., (mouse-a).dot(delta)/delta.length_squared)) if delta.length_squared else 0.
+        distance = (mouse - (a + delta*factor)).length
+        endpoint_distance = min((mouse-a).length, (mouse-b).length)
+        if distance <= _LINE_HIT_RADIUS or endpoint_distance <= _HANDLE_RADIUS:
+            matches.append((distance, index != active, index))
+    return min(matches)[2] if matches else None
+
+
+def _remove_ruler(context, index):
+    """Delete one idle ruler and release its listener/proxy when necessary."""
+    manager = collection(context.window)
+    if manager is None or manager.mode != 'IDLE' or not 0 <= index < len(manager.items):
+        return False
+    point_edit.stop()
+    manager.items.pop(index)
+    if index < manager.active:
+        manager.active -= 1
+    manager.active = min(manager.active, len(manager.items)-1)
+    manager.active_endpoint = None
+    manager.recalculate()
+    if not manager.items:
+        pointer = context.window.as_pointer()
+        operator = _sessions.get(pointer)
+        if operator:
+            operator.finish(context, keep=False)
+        _states.pop(pointer, None)
+    _changed(context)
+    return True
 
 
 def _native_point_operator_running(window):
@@ -141,6 +181,7 @@ class RulerCollection:
         self.picker = None
         self.epoch = -1
         self._pending_vertex_resolution = False
+        self._suppress_next_fork = False
         self.query_key = None
 
     @property
@@ -159,6 +200,111 @@ class RulerCollection:
             return tuple(anchor['point'])
         return tuple(self.picker.resolve(context, anchor))
 
+    @staticmethod
+    def _original_vertex_hit(hit):
+        anchor = hit.get('anchor', {}) if hit else {}
+        return (anchor.get('snap_source') == 'ORIGINAL' and
+                anchor.get('snap_kind') == 'VERTEX' and 'vertex_id' in anchor)
+
+    @staticmethod
+    def _freeze_hit(hit):
+        point = tuple(hit['point'])
+        hit['anchor'] = {'kind': 'WORLD', 'point': point}
+        hit['object_name'] = hit.get('object_name', 'Mesh') + ' (frozen)'
+
+    def _fork_evidence(self, context, hits):
+        evidence = []
+        for hit in hits:
+            if self._original_vertex_hit(hit):
+                try:
+                    evidence.append(self.picker.vertex_lineage(context, hit['anchor']))
+                except VertexResolutionDeferred:
+                    self._pending_vertex_resolution = True
+                    evidence.append(None)
+                except (ValueError, ReferenceError, RuntimeError):
+                    evidence.append(None)
+            else:
+                evidence.append(None)
+        descendants = [index for index, part in enumerate(evidence)
+                       if part and part.get('descendant')]
+        if not descendants:
+            return evidence, None
+        if len(descendants) == 2:
+            a, b = hits
+            if (a['anchor'].get('owner_uid') != b['anchor'].get('owner_uid') or
+                    a['anchor'].get('mesh_uid') != b['anchor'].get('mesh_uid')):
+                return evidence, None
+            one, two = (part['descendant'] for part in evidence)
+            if one['index'] == two['index']:
+                return evidence, None
+            same_face = set(one['face_tokens']).intersection(two['face_tokens'])
+            same_edge = set(one['edge_tokens']).intersection(two['edge_tokens'])
+            if not same_face and not same_edge:
+                return evidence, None
+        else:
+            changed = descendants[0]
+            other = 1 - changed
+            other_hit = hits[other]
+            if other_hit is None:
+                return evidence, None
+            if other_hit['anchor'].get('kind') != 'WORLD':
+                other_proof = evidence[other]
+                changed_anchor = hits[changed]['anchor']
+                if (not other_proof or other_proof.get('original_index') is None or
+                        changed_anchor.get('owner_uid') != other_hit['anchor'].get('owner_uid') or
+                        changed_anchor.get('mesh_uid') != other_hit['anchor'].get('mesh_uid')):
+                    return evidence, None
+                try:
+                    connected = self.picker.original_vertices_connected(
+                        context, changed_anchor,
+                        evidence[changed]['descendant']['index'],
+                        other_proof['original_index'])
+                except (ValueError, ReferenceError, RuntimeError):
+                    return evidence, None
+                if not connected:
+                    return evidence, None
+        # Keep source anchors separately: resolve() may rewrite the parents.
+        return evidence, (evidence, tuple(dict(hit['anchor']) if hit else None for hit in hits))
+
+    def _append_fork(self, context, source, source_index, proof):
+        evidence, anchors = proof
+        child_hits = []
+        for slot, parent_hit in enumerate((source.first, source.second)):
+            if parent_hit is None:
+                return False
+            hit = dict(parent_hit)
+            hit['anchor'] = dict(parent_hit['anchor'])
+            descendant = evidence[slot]['descendant'] if evidence[slot] else None
+            if descendant is not None:
+                if not anchors[slot] or not self._original_vertex_hit({'anchor': anchors[slot]}):
+                    return False
+                hit['anchor'] = dict(anchors[slot])
+                identity = self.picker.bind_descendant(
+                    context, anchors[slot], descendant['index'])
+                hit['anchor'].update(identity)
+                hit['anchor']['feature'] = descendant['index']
+                hit['anchor']['indices'] = (descendant['index'],)
+                hit['anchor']['weights'] = (1.,)
+                hit['point'] = descendant['point']
+                hit['object_name'] = self.picker.original_vertex_owner(context, anchors[slot]).name
+            child_hits.append(hit)
+        child = RulerState(context)
+        child.first, child.second = child_hits
+        child.area_pointer = source.area_pointer
+        child.precision = source.precision
+        child.trim_zeros = source.trim_zeros
+        child.color = source.color
+        child.label = (source.label if source.label.endswith(' (new)')
+                       else source.label + ' (new)') if source.label else 'New topology (new)'
+        child.message = f'New vertex branch of ruler {source_index+1}'
+        child.recalculate()
+        self.items.append(child)
+        if (self.active == source_index and self.mode == 'IDLE' and
+                self.active_endpoint is None):
+            self.active = len(self.items) - 1
+            self.active_endpoint = None
+        return True
+
     def refresh(self, context, epoch):
         if self.context_key != (context.scene.as_pointer(), context.view_layer.as_pointer()):
             raise ValueError('Scene or view layer changed; start new rulers')
@@ -172,21 +318,36 @@ class RulerCollection:
         self._pending_vertex_resolution = False
         self.query_key = None
         self.candidate = None
+        fork_proofs = []
+        freeze_slots = set()
+        if not self._suppress_next_fork:
+            for index, item in enumerate(tuple(self.items)):
+                hits = (item.first, item.second)
+                evidence, proof = self._fork_evidence(context, hits)
+                if proof is not None:
+                    for slot, part in enumerate(evidence):
+                        if part and part.get('freeze_parent'):
+                            freeze_slots.add((id(item), slot))
+                    fork_proofs.append((index, item, proof))
         # An unavailable anchor affects only its own endpoint.
         for item in self.items:
             for slot, attr in enumerate(_SLOTS):
                 hit = getattr(item, attr)
                 if hit is None:
                     continue
+                if (id(item), slot) in freeze_slots:
+                    self._freeze_hit(hit)
+                    item.errors[slot] = (
+                        f'Point {slot+1} preserved at its prior position; '
+                        'pick it again to rebind.')
+                    continue
                 try:
                     hit['point'] = self.resolve_hit(context, hit)
                 except VertexResolutionDeferred:
                     self._pending_vertex_resolution = True
                 except (ValueError, ReferenceError, RuntimeError) as exc:
-                    setattr(item, attr, None)
-                    item.errors[slot] = f'Point {slot+1}: {exc}. Pick it again.'
-                    if item is self.selected and self.active_endpoint == slot:
-                        self.active_endpoint = None
+                    self._freeze_hit(hit)
+                    item.errors[slot] = f'Point {slot+1} frozen: {exc}. Pick it again to rebind.'
             item.message = item.error_message()
         # Cancel restores the current deformed anchor, never its old world point.
         if self.original is not None:
@@ -195,8 +356,17 @@ class RulerCollection:
             except VertexResolutionDeferred:
                 self._pending_vertex_resolution = True
             except (ValueError, ReferenceError, RuntimeError):
-                self.original = None
+                self._freeze_hit(self.original)
+        for index, item, proof in fork_proofs:
+            try:
+                self._append_fork(context, item, index, proof)
+            except (ValueError, ReferenceError, RuntimeError):
+                # The old ruler remains visible even if descendant binding
+                # becomes ambiguous after another edit in this same epoch.
+                continue
         self.recalculate()
+        if not self._pending_vertex_resolution:
+            self._suppress_next_fork = False
 
     def pick(self, context, epoch, region, rv3d, coordinate, force=False, snap_invert=False):
         self.refresh(context, epoch)
@@ -469,6 +639,28 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
                     closest, distance = (index, slot), (point-coordinate).length
         return closest
 
+    def _near_ruler(self, context):
+        if (self._state.epoch != _parent()._epoch or
+                self._state.context_key != (context.scene.as_pointer(), context.view_layer.as_pointer())):
+            return None
+        target = hover._viewport_at(context.window, self._mouse)
+        if target is None:
+            return None
+        area, region = target
+        space = area.spaces.active
+        if space.region_quadviews or not space.overlay.show_overlays:
+            return None
+        coordinate = (self._mouse[0]-region.x, self._mouse[1]-region.y)
+        segments = []
+        # Rulers are drawn in every viewport of their window, even when their
+        # endpoint interaction owner is another area.
+        for index, item in enumerate(self._state.items):
+            points = [view3d_utils.location_3d_to_region_2d(
+                region, space.region_3d, Vector(hit['point'])) if hit else None
+                for hit in (item.first, item.second)]
+            segments.append((index, *points))
+        return _nearest_screen_ruler(coordinate, segments, self._state.active)
+
     def _active_screen_distance(self, context):
         manager = self._state
         target = hover._viewport_at(context.window, self._mouse)
@@ -505,7 +697,7 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         if not manager.items:
             self.finish(context, keep=False)
             return {'CANCELLED'}
-        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'LEFTMOUSE', 'RIGHTMOUSE'}:
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'LEFTMOUSE', 'RIGHTMOUSE', 'MIDDLEMOUSE'}:
             self._mouse = (event.mouse_x, event.mouse_y)
             self._snap_invert = bool(getattr(event, 'ctrl', False))
         elif event.type in {'LEFT_CTRL', 'RIGHT_CTRL'}:
@@ -518,6 +710,17 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             self._snap_invert = False
             if manager.mode == 'DRAG' or self._pending_pie:
                 return self._cancel_interaction(context)
+        if event.type == 'MIDDLEMOUSE':
+            if (event.value != 'PRESS' or manager.mode != 'IDLE'
+                    or event.shift or event.ctrl or event.alt or event.oskey
+                    or self._native_pie_open or _native_point_operator_running(context.window)):
+                return {'PASS_THROUGH'}
+            index = self._near_ruler(context)
+            if index is None:
+                return {'PASS_THROUGH'}
+            if _remove_ruler(context, index):
+                return {'RUNNING_MODAL'} if manager.items else {'FINISHED'}
+            return {'PASS_THROUGH'}
         if manager.mode == 'IDLE' and point_edit.active(manager):
             if event.type == 'S' and event.value == 'PRESS' and event.shift and not event.ctrl:
                 self._native_pie_open = True
@@ -702,16 +905,13 @@ class VIEW3D_OT_final_dimensions_ruler_clear(bpy.types.Operator):
     def execute(self, context):
         manager = collection(context.window)
         if manager and manager.selected:
-            point_edit.stop()
             # A selected unfinished addition is itself the item being removed.
             if manager.mode == 'ADD':
+                point_edit.stop()
                 manager.cancel_interaction()
             else:
                 manager.cancel_interaction()
-                manager.items.pop(manager.active)
-                manager.active = min(manager.active, len(manager.items)-1)
-                manager.active_endpoint = None
-                manager.recalculate()
+                _remove_ruler(context, manager.active)
             if not manager.items:
                 operator = _sessions.get(context.window.as_pointer())
                 if operator:
@@ -862,6 +1062,14 @@ def tick_window(window, epoch):
                 _states.pop(window.as_pointer(), None)
         _redraw(window)
         return
+    if window.as_pointer() not in _sessions and manager.items:
+        area, region = _area_context(window, manager)
+        if area and region:
+            try:
+                with bpy.context.temp_override(window=window, area=area, region=region):
+                    _ensure_listener(bpy.context)
+            except (ValueError, ReferenceError, RuntimeError):
+                pass
     if manager.epoch == epoch and not manager._pending_vertex_resolution:
         return
     parent = _parent()
@@ -884,6 +1092,44 @@ def tick_window(window, epoch):
         parent._measuring = previous
     point_edit.sync(window, manager, _world_hit)
     _redraw(window)
+
+
+def after_history_change():
+    """Keep completed measurements while releasing pre-Undo UI and caches."""
+    global _generation
+    _generation += 1
+    # undo_pre/redo_pre already stop the proxy. Undo may recreate its helper ID.
+    point_edit.cleanup_tagged()
+    windows = {window.as_pointer(): window
+               for window in tuple(bpy.context.window_manager.windows)}
+    for pointer, operator in tuple(_sessions.items()):
+        window = windows.get(pointer)
+        if window is not None:
+            try:
+                with bpy.context.temp_override(window=window):
+                    operator.finish(bpy.context, keep=True)
+            except (ValueError, ReferenceError, RuntimeError):
+                _sessions.pop(pointer, None)
+        else:
+            _sessions.pop(pointer, None)
+    for pointer, manager in tuple(_states.items()):
+        window = windows.get(pointer)
+        if window is None:
+            _states.pop(pointer, None)
+            continue
+        if manager.mode != 'IDLE':
+            manager.cancel_interaction()
+        manager.context_key = (window.scene.as_pointer(), window.view_layer.as_pointer())
+        manager.active_endpoint = None
+        manager.candidate = None
+        manager.original = None
+        manager.query_key = None
+        manager.picker = None
+        manager.epoch = -1
+        manager._pending_vertex_resolution = False
+        manager._suppress_next_fork = True
+        manager.recalculate()
+        _redraw(window)
 
 
 def stop_all(clear=True):
@@ -1082,6 +1328,7 @@ def draw_panel(layout, context):
                      text='Point to 3D Cursor', icon='CURSOR')
     else:
         box.label(text='Drag point · Right click to replace')
+        box.label(text='Middle click line to remove')
     for hit in (state.first, state.second):
         if hit:
             box.label(text=hit['object_name'])

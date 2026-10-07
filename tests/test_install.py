@@ -40,7 +40,7 @@ assert module._on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post
 assert not module._cache
 assert not module.ruler._registered and not module.ruler._handles
 assert not module.ruler._sessions and not module.ruler._states
-assert not module.loop_offset._preview_handles
+assert not module.loop_offset._preview_handles and not module.loop_offset._preview_windows
 assert module.loop_offset._on_load_pre not in bpy.app.handlers.load_pre
 assert not hasattr(bpy.types.Scene, 'final_dimensions_ruler_appearance')
 bpy.ops.preferences.addon_enable(module=module_name)

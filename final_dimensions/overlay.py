@@ -132,6 +132,9 @@ def _draw():
     region = context.region
     if window is None or area is None or region is None:
         return
+    from . import hover
+    if hover.temporarily_suppressed(window):
+        return
     if not context.window_manager.final_dimensions_show_overlay:
         return
     if area.type != "VIEW_3D" or not area.spaces.active.overlay.show_overlays:
