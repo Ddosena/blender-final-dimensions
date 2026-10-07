@@ -35,15 +35,21 @@ def main():
     if match is None:
         raise RuntimeError('Could not read Blender version')
     blender_version = match.group(1) + ('-LTS' if match.group(2) else '')
-    report = {'blender': blender_version, 'addon': version, 'checks': []}
+    report = {'blender': blender_version, 'addon': version, 'checks': [], 'unverified': []}
     environment = os.environ.copy()
     environment['BLENDER_USER_RESOURCES'] = str(artifacts / 'profiles' / ('checks-'+blender_version))
+    startup = None
+    if os.name == 'nt':
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
 
     def run(name, command):
         print('CHECK', name, flush=True)
         result = subprocess.run([blender, *command], cwd=ROOT, env=environment,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding='utf-8', errors='replace', timeout=240)
+                                text=True, encoding='utf-8', errors='replace', timeout=240,
+                                startupinfo=startup)
         (artifacts / f'{name}-{blender_version}.log').write_text(result.stdout, encoding='utf-8')
         if result.returncode:
             print(result.stdout, flush=True)
@@ -51,7 +57,8 @@ def main():
         report['checks'].append(name)
 
     for script in ('test_blender', 'test_extra', 'test_direction', 'test_section',
-                   'test_cursor_diameter', 'test_surface', 'test_snapping'):
+                   'test_cursor_diameter', 'test_surface', 'test_snapping',
+                   'test_vertex_tracking', 'test_offset_cut', 'test_ruler_style'):
         run(script, ['--background', '--factory-startup', '--python-exit-code', '1',
                      '--python', str(ROOT / 'tests' / (script+'.py'))])
     run('build', ['--factory-startup', '--command', 'extension', 'build',
@@ -64,7 +71,15 @@ def main():
         for script, prefix in (('test_hover_live', 'hover-live'), ('test_ruler_live', 'ruler-live'),
                                ('test_multi_ruler_live', 'multi-ruler-live'),
                                ('test_snap_ruler_live', 'snap-ruler-live'),
-                               ('test_cursor_ruler_live', 'cursor-ruler-live')):
+                               ('test_cursor_ruler_live', 'cursor-ruler-live'),
+                               ('test_active_ruler_live', 'active-ruler-live'),
+                               ('test_vertex_ruler_live', 'vertex-ruler-live'),
+                               ('test_smooth_ruler_live', 'smooth-ruler-live'),
+                               ('test_offset_cut_live', 'offset-cut-live'),
+                               ('test_offset_cut_panel_live', 'offset-cut-panel-live'),
+                               ('test_ruler_style_live', 'ruler-style-live'),
+                               ('test_ruler_display_live', 'ruler-display-live'),
+                               ('test_ruler_style_disable_live', 'ruler-style-disable-live')):
             result_path = artifacts / f'{prefix}-{blender_version}.json'
             # An old report must never pass a failed new process.
             if result_path.exists():
@@ -74,9 +89,17 @@ def main():
                          '--python', str(ROOT / 'tests' / (script+'.py'))])
             result = json.loads(result_path.read_text(encoding='utf-8'))
             assert result['status'] == 'PASS', result
+            report['unverified'].extend(f'{script}: {case}' for case in result.get('unverified', ()))
+        saved = artifacts / 'runtime-temp' / ('active-ruler-'+blender_version) / 'native-clean.blend'
+        run('test_ruler_saved_load', ['--background', '--factory-startup', str(saved),
+                                     '--python-exit-code', '1', '--python',
+                                     str(ROOT / 'tests/test_ruler_saved_load.py'), '--',
+                                     str(artifacts / ('ruler-saved-load-'+blender_version+'.json'))])
     report['status'] = 'PASS'
+    report['coverage_status'] = 'PARTIAL' if report['unverified'] else 'COMPLETE'
     (artifacts / f'checks-{blender_version}.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
-    print('ALL CHECKS PASS', blender_version, 'Final Dimensions', version, flush=True)
+    print('CHECKS PASS', blender_version, 'Final Dimensions', version,
+          'Unverified:', report['unverified'], flush=True)
 
 
 if __name__ == '__main__':

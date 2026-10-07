@@ -11,6 +11,7 @@ import numpy as np
 
 from .section import Geometry, MAX_VERTICES, MAX_TRIANGLES
 from .surface import ScenePicker, _barycentric, _ray_box
+from .vertex_tracking import TRACKER
 
 SUPPORTED_ELEMENTS = frozenset({'VERTEX', 'EDGE', 'FACE', 'FACE_PROJECT', 'EDGE_MIDPOINT'})
 SNAP_RADIUS = 14.0
@@ -19,7 +20,7 @@ MAX_EDGES = 700_000
 
 
 class _Features(Geometry):
-    def __init__(self, vertices, normals, triangles, smooth, edges, hidden, selected):
+    def __init__(self, vertices, normals, triangles, smooth, edges, face_topology, hidden, selected):
         if len(triangles):
             super().__init__(vertices, normals, triangles, smooth)
         else:
@@ -33,6 +34,13 @@ class _Features(Geometry):
         for array in (np.asarray((len(vertices), len(edges), len(triangles)), dtype=np.int64), edges, triangles):
             digest.update(array.tobytes())
         self.feature_topology = digest.hexdigest()
+        # Triangulation can flip while a polygon deforms. Vertex indices remain
+        # meaningful only while the actual mesh edge/face connectivity stays.
+        digest = hashlib.blake2b(digest_size=16)
+        for array in (np.asarray((len(vertices), len(edges)), dtype=np.int64), edges):
+            digest.update(array.tobytes())
+        digest.update(face_topology)
+        self.vertex_topology = digest.hexdigest()
 
     def ray_cast(self, origin, direction):
         return super().ray_cast(origin, direction) if self.bvh is not None else None
@@ -60,6 +68,10 @@ def _snapshot(mesh, matrix, edit=False):
         normals = np.asarray([tuple(v.normal) for v in mesh.verts], dtype=np.float64).reshape(-1, 3)
         edges = np.asarray([[v.index for v in e.verts] for e in mesh.edges], dtype=np.int32).reshape(-1, 2)
         triangles = np.asarray([[l.vert.index for l in tri] for tri in tessellation], dtype=np.int32).reshape(-1, 3)
+        face_digest = hashlib.blake2b(digest_size=16)
+        for face in mesh.faces:
+            face_digest.update(np.asarray((len(face.verts), *(vert.index for vert in face.verts)),
+                                          dtype=np.int32).tobytes())
         smooth = np.asarray([tri[0].face.smooth for tri in tessellation], dtype=np.bool_)
         hidden = (np.asarray([v.hide for v in mesh.verts]), np.asarray([e.hide for e in mesh.edges]),
                   np.asarray([tri[0].face.hide for tri in tessellation]))
@@ -85,6 +97,13 @@ def _snapshot(mesh, matrix, edit=False):
         mesh.loop_triangles.foreach_get('vertices', triangles)
         xyz, normals = xyz.reshape(-1, 3).astype(np.float64), normals.reshape(-1, 3).astype(np.float64)
         edges, triangles = edges.reshape(-1, 2), triangles.reshape(-1, 3)
+        totals = np.empty(len(mesh.polygons), dtype=np.int32)
+        loops = np.empty(len(mesh.loops), dtype=np.int32)
+        mesh.polygons.foreach_get('loop_total', totals)
+        mesh.loops.foreach_get('vertex_index', loops)
+        face_digest = hashlib.blake2b(digest_size=16)
+        face_digest.update(totals.tobytes())
+        face_digest.update(loops.tobytes())
         polygon = np.empty(nt, dtype=np.int32)
         mesh.loop_triangles.foreach_get('polygon_index', polygon)
         flags = []
@@ -111,7 +130,7 @@ def _snapshot(mesh, matrix, edit=False):
         normals /= np.maximum(np.linalg.norm(normals, axis=1)[:, None], 1e-30)
     except np.linalg.LinAlgError:
         normals[:] = 0
-    return _Features(xyz, normals, triangles, smooth, edges,
+    return _Features(xyz, normals, triangles, smooth, edges, face_digest.digest(),
                      tuple(np.asarray(v, dtype=np.bool_) for v in hidden),
                      tuple(np.asarray(v, dtype=np.bool_) for v in selected))
 
@@ -176,10 +195,17 @@ def _front_flags(geometry, camera, perspective, direction):
 
 
 class SnapPicker(ScenePicker):
+    def __init__(self, context, epoch):
+        self._vertex_tracker = TRACKER
+        super().__init__(context, epoch)
+
     def refresh(self, context, epoch):
         changed = super().refresh(context, epoch)
         if changed:
             self._original_bounds = {}
+            for record in self.records:
+                if record['key'][0] == 'OBJECT':
+                    self._vertex_tracker.observe_edit(self._owner(context, record))
         return changed
 
     def _feature_geometry(self, context, record, source):
@@ -261,7 +287,8 @@ class SnapPicker(ScenePicker):
         anchor = {'key': record['key'], 'owner_uid': record['owner_uid'],
                   'snap_source': source, 'snap_kind': kind, 'feature': int(index),
                   'indices': tuple(map(int, indices)), 'weights': tuple(map(float, weights)),
-                  'topology': geometry.feature_topology}
+                  'topology': geometry.feature_topology,
+                  'vertex_topology': geometry.vertex_topology}
         return {'point': tuple(map(float, point)), 'normal': tuple(map(float, normal)),
                 'object_name': record['name'], 'anchor': anchor, 'warnings': record['warnings'],
                 'snap_kind': kind, 'snap_source': source}
@@ -364,7 +391,15 @@ class SnapPicker(ScenePicker):
                         normal = np.asarray(feature_weights) @ geometry.normals[list(indices)]
                         norm = np.linalg.norm(normal)
                         normal = normal/norm if norm > 1e-15 else -direction
+                        vertex_identity = None
+                        if layer == 'ORIGINAL' and kind == 'VERTEX':
+                            try:
+                                vertex_identity = self._vertex_tracker.bind(owner, index)
+                            except ValueError:
+                                continue
                         best = self._hit(record, geometry, layer, kind, index, indices, feature_weights, point, normal)
+                        if vertex_identity is not None:
+                            best['anchor'].update(vertex_identity)
                         best_key = sort_key
                         break
                 if elements & {'FACE', 'FACE_PROJECT'} and (best_key is None or best_key[0] > 0):
@@ -399,11 +434,17 @@ class SnapPicker(ScenePicker):
             source = anchor['snap_source']
             if source not in {'ORIGINAL', 'FINAL'} or (source == 'ORIGINAL' and record['key'][0] != 'OBJECT'):
                 raise ValueError('Anchor source is invalid')
+            if source == 'ORIGINAL' and anchor['snap_kind'] == 'VERTEX' and 'vertex_id' in anchor:
+                return self._vertex_tracker.resolve(self._owner(context, record), anchor)
             geometry = self._feature_geometry(context, record, source)
             indices = np.asarray(anchor['indices'], dtype=np.int64)
             weights = np.asarray(anchor['weights'], dtype=np.float64)
             kind, index = anchor['snap_kind'], int(anchor['feature'])
-            if geometry is None or geometry.feature_topology != anchor['topology']:
+            topology = (geometry.vertex_topology if kind == 'VERTEX' and 'vertex_topology' in anchor
+                        else geometry.feature_topology) if geometry is not None else None
+            expected_topology = (anchor.get('vertex_topology', anchor['topology']) if kind == 'VERTEX'
+                                 else anchor['topology'])
+            if geometry is None or topology != expected_topology:
                 raise ValueError('Anchor topology changed')
             count = len(geometry.vertices) if kind == 'VERTEX' else len(geometry.edges) if kind in {'EDGE', 'EDGE_MIDPOINT'} else len(geometry.triangles) if kind == 'FACE' else 0
             if not 0 <= index < count:

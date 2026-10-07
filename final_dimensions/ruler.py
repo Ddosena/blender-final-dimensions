@@ -1,18 +1,17 @@
 """Window-local surface rulers with one shared picker and passive editing listener."""
 
-import math
 import sys
 import textwrap
 import time
 
 import bpy
 import gpu
+from bpy.app.handlers import persistent
 from bpy.props import BoolProperty, EnumProperty, IntProperty
 from bpy_extras import view3d_utils
 from mathutils import Vector
 
-from . import overlay, hover
-from .measure import format_length
+from . import drawing, overlay, hover, point_edit, ruler_style
 from .snapping import SnapPicker, SUPPORTED_ELEMENTS
 
 
@@ -23,6 +22,7 @@ _registered = False
 _generation = 0
 _INTERVAL = 0.08
 _HANDLE_RADIUS = 12.0
+_DRAG_THRESHOLD = 5.0
 _SLOTS = ('first', 'second')
 
 
@@ -34,14 +34,26 @@ def _world_hit(point):
             'warnings': ()}
 
 
+def _native_point_operator_running(window):
+    """Let Blender finish its own pie or transform before ending point selection."""
+    try:
+        return any(op.bl_rna.identifier not in {
+            'VIEW3D_OT_final_dimensions_ruler', 'VIEW3D_OT_final_dimensions_hover'}
+            for op in window.modal_operators)
+    except (AttributeError, ReferenceError, RuntimeError):
+        return False
+
+
 def _ruler_snap_pie(menu, _context):
     pie = menu.layout.menu_pie()
     pie.operator('view3d.snap_cursor_to_grid', text='Cursor to Grid', icon='CURSOR')
     pie.operator(VIEW3D_OT_final_dimensions_ruler_to_cursor.bl_idname,
                  text='Point to 3D Cursor', icon='CURSOR')
-    pie.operator('view3d.snap_cursor_to_selected', text='Cursor to Selected', icon='CURSOR')
+    pie.operator(VIEW3D_OT_final_dimensions_cursor_to_ruler_point.bl_idname,
+                 text='Cursor to Selected Point', icon='CURSOR')
     pie.operator('view3d.snap_cursor_to_center', text='Cursor to World Origin', icon='CURSOR')
-    pie.operator('view3d.snap_cursor_to_active', text='Cursor to Active', icon='CURSOR')
+    pie.operator(VIEW3D_OT_final_dimensions_cursor_to_ruler_point.bl_idname,
+                 text='Cursor to Active Point', icon='CURSOR')
 
 
 def _open_ruler_snap_pie(context, event, target):
@@ -94,6 +106,10 @@ class RulerState:
         self.message = ''
         self.area_pointer = context.area.as_pointer() if context and context.area else 0
         self.errors = {}
+        self.label = ''
+        self.precision = 3
+        self.trim_zeros = True
+        self.color = None
 
     def endpoints(self, slot=None, candidate=None):
         ends = [self.first, self.second]
@@ -116,6 +132,7 @@ class RulerCollection:
         self.context_key = (context.scene.as_pointer(), context.view_layer.as_pointer())
         self.items = []
         self.active = -1
+        self.active_endpoint = None
         self.mode = 'IDLE'
         self.slot = 0
         self.candidate = None
@@ -163,6 +180,8 @@ class RulerCollection:
                 except (ValueError, ReferenceError, RuntimeError) as exc:
                     setattr(item, attr, None)
                     item.errors[slot] = f'Point {slot+1}: {exc}. Pick it again.'
+                    if item is self.selected and self.active_endpoint == slot:
+                        self.active_endpoint = None
             item.message = item.error_message()
         # Cancel restores the current deformed anchor, never its old world point.
         if self.original is not None:
@@ -210,6 +229,7 @@ class RulerCollection:
         if self.mode == 'ADD' and self.selected is not None:
             self.items.pop(self.active)
             self.active = min(self.active, len(self.items)-1)
+            self.active_endpoint = None
         elif self.mode in {'DRAG', 'REPLACE'} and self.selected is not None:
             setattr(self.selected, _SLOTS[self.slot], self.original)
         self.idle()
@@ -226,6 +246,7 @@ class RulerCollection:
         self.cancel_interaction()
         self.items.append(RulerState(context))
         self.active = len(self.items)-1
+        self.active_endpoint = None
         self.mode, self.slot = 'ADD', 0
 
     def select(self, index):
@@ -235,6 +256,7 @@ class RulerCollection:
             return True
         item = self.items[index]
         self.cancel_interaction()
+        self.active_endpoint = None
         if item in self.items:
             self.active = self.items.index(item)
         # Selecting an incomplete surviving ruler offers its missing point.
@@ -245,11 +267,24 @@ class RulerCollection:
                 self.begin_endpoint(1, 'REPLACE')
         return self.selected is not None
 
+    def activate_endpoint(self, index, slot):
+        if not 0 <= index < len(self.items) or slot not in (0, 1):
+            return False
+        if self.mode != 'IDLE':
+            self.cancel_interaction()
+            if not 0 <= index < len(self.items):
+                return False
+        self.active = index
+        self.active_endpoint = slot
+        self.recalculate()
+        return True
+
     def begin_endpoint(self, slot, mode):
         item = self.selected
         if item is None or slot not in (0, 1):
             return False
         self.mode, self.slot = mode, slot
+        self.active_endpoint = slot
         hit = getattr(item, _SLOTS[slot])
         self.original = dict(hit) if hit else None
         self.candidate = dict(hit) if hit and mode == 'DRAG' else None
@@ -274,8 +309,10 @@ class RulerCollection:
         item = self.selected
         setattr(item, _SLOTS[self.slot], dict(self.candidate))
         item.errors.pop(self.slot, None)
+        self.active_endpoint = self.slot
         if self.mode == 'ADD' and self.slot == 0:
             self.slot = 1
+            self.active_endpoint = 1
             self.candidate = None
             self.query_key = None
             self.recalculate()
@@ -335,6 +372,7 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         if manager is None:
             manager = _states[pointer] = RulerCollection(context)
         if not self.listen_only:
+            point_edit.stop()
             manager.add(context)
         elif not manager.items:
             _states.pop(pointer, None)
@@ -349,6 +387,9 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         self._last_tick = 0.0
         self._cursor_active = False
         self._pending_pie = False
+        self._native_pie_open = False
+        self._drag_start_mouse = None
+        self._drag_started = False
         self._state = manager
         self._timer = context.window_manager.event_timer_add(_INTERVAL, window=context.window)
         _sessions[pointer] = self
@@ -401,23 +442,45 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         _redraw(context.window)
 
     def _near_endpoint(self, context):
-        target = self._target(context)
+        target = hover._viewport_at(context.window, self._mouse)
         if target is None:
             return None
         area, region = target
+        if area.spaces.active.region_quadviews or not area.spaces.active.overlay.show_overlays:
+            return None
         coordinate = Vector((self._mouse[0]-region.x, self._mouse[1]-region.y))
         closest, distance = None, _HANDLE_RADIUS
-        for slot, hit in enumerate((self._state.selected.first, self._state.selected.second)):
-            if hit is None:
+        for index, item in enumerate(self._state.items):
+            if item.area_pointer != area.as_pointer():
                 continue
-            point = view3d_utils.location_3d_to_region_2d(
-                region, area.spaces.active.region_3d, Vector(hit['point']))
-            if point is not None and (point-coordinate).length <= distance:
-                closest, distance = slot, (point-coordinate).length
+            for slot, hit in enumerate((item.first, item.second)):
+                if hit is None:
+                    continue
+                point = view3d_utils.location_3d_to_region_2d(
+                    region, area.spaces.active.region_3d, Vector(hit['point']))
+                if point is not None and (point-coordinate).length <= distance:
+                    closest, distance = (index, slot), (point-coordinate).length
         return closest
+
+    def _active_screen_distance(self, context):
+        manager = self._state
+        target = hover._viewport_at(context.window, self._mouse)
+        if target is None or manager.selected is None or manager.active_endpoint is None:
+            return float('inf')
+        area, region = target
+        hit = getattr(manager.selected, _SLOTS[manager.active_endpoint])
+        if hit is None or area.as_pointer() != manager.selected.area_pointer:
+            return float('inf')
+        projected = view3d_utils.location_3d_to_region_2d(
+            region, area.spaces.active.region_3d, Vector(hit['point']))
+        if projected is None:
+            return float('inf')
+        return (projected-Vector((self._mouse[0]-region.x, self._mouse[1]-region.y))).length
 
     def _cancel_interaction(self, context):
         self._pending_pie = False
+        self._drag_start_mouse = None
+        self._drag_started = False
         self._state.cancel_interaction()
         self._sync_cursor(context)
         if not self._state.items:
@@ -440,7 +503,7 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             self._snap_invert = bool(getattr(event, 'ctrl', False))
         elif event.type in {'LEFT_CTRL', 'RIGHT_CTRL'}:
             self._snap_invert = bool(getattr(event, 'ctrl', False))
-            if manager.mode != 'IDLE':
+            if manager.mode != 'IDLE' and (manager.mode != 'DRAG' or self._drag_started):
                 self._safe_update(context, force=True)
                 return {'RUNNING_MODAL'}
         elif event.type == 'WINDOW_DEACTIVATE':
@@ -448,13 +511,50 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             self._snap_invert = False
             if manager.mode == 'DRAG' or self._pending_pie:
                 return self._cancel_interaction(context)
+        if manager.mode == 'IDLE' and point_edit.active(manager):
+            if event.type == 'S' and event.value == 'PRESS' and event.shift and not event.ctrl:
+                self._native_pie_open = True
+                return {'PASS_THROUGH'}
+            if event.type in {'G', 'R', 'S'} and event.value == 'PRESS' and not event.shift:
+                return {'PASS_THROUGH'}
+            if event.type == 'ESC' and event.value == 'PRESS':
+                if self._native_pie_open or _native_point_operator_running(context.window):
+                    self._native_pie_open = False
+                    return {'PASS_THROUGH'}
+                point_edit.stop()
+                _redraw(context.window)
+                return {'RUNNING_MODAL'}
+            if self._native_pie_open and event.type == 'LEFTMOUSE':
+                if event.value == 'RELEASE':
+                    self._native_pie_open = False
+                return {'PASS_THROUGH'}
+            if _native_point_operator_running(context.window):
+                return {'PASS_THROUGH'}
+            if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+                match = self._near_endpoint(context)
+                if match is None and self._active_screen_distance(context) <= 120.:
+                    return {'PASS_THROUGH'}
+                point_edit.stop()
+                if match is None:
+                    _redraw(context.window)
+                    return {'PASS_THROUGH'}
+            if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
+                if self._near_endpoint(context) is None:
+                    return {'PASS_THROUGH'}
+                point_edit.stop()
         if event.type == 'ESC' and event.value == 'PRESS' and manager.mode != 'IDLE':
             return self._cancel_interaction(context)
+        if event.type == 'ESC' and event.value == 'PRESS' and manager.active_endpoint is not None:
+            manager.active_endpoint = None
+            _redraw(context.window)
+            return {'RUNNING_MODAL'}
         pie_target = (hover._viewport_at(context.window, (event.mouse_x, event.mouse_y))
                       if (event.type == 'S' and event.value == 'PRESS' and event.shift
                           and not event.ctrl and not event.alt and not event.oskey) else None)
         if (pie_target is not None and not self._pending_pie
-                and manager.mode != 'IDLE' and manager.selected is not None
+                and (manager.mode != 'IDLE' or
+                     manager.active_endpoint is not None and not point_edit.active(manager))
+                and manager.selected is not None
                 and not pie_target[0].spaces.active.region_quadviews
                 and pie_target[0].spaces.active.overlay.show_overlays
                 and pie_target[0].as_pointer() == manager.selected.area_pointer):
@@ -492,19 +592,32 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             if now-self._last_tick >= _INTERVAL*.9:
                 self._last_tick = now
                 tick_window(context.window, _parent()._epoch)
-                if manager.mode != 'IDLE':
+                if manager.mode != 'IDLE' and (manager.mode != 'DRAG' or self._drag_started):
                     self._safe_update(context)
             return {'PASS_THROUGH'}
         if manager.mode == 'DRAG':
             if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
-                self._safe_update(context)
+                if (self._drag_start_mouse is not None and
+                        (Vector(self._mouse)-Vector(self._drag_start_mouse)).length >= _DRAG_THRESHOLD):
+                    self._drag_started = True
+                if self._drag_started:
+                    self._safe_update(context)
                 return {'RUNNING_MODAL'}
             if event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
-                self._safe_update(context, force=True)
-                if manager.candidate is None:
-                    manager.cancel_interaction()
+                if self._drag_started:
+                    self._safe_update(context, force=True)
+                    if manager.candidate is None:
+                        manager.cancel_interaction()
+                    else:
+                        manager.confirm()
                 else:
-                    manager.confirm()
+                    manager.idle()
+                    if manager.selected and getattr(manager.selected, _SLOTS[manager.active_endpoint]) is not None:
+                        if not point_edit.activate(context, manager, manager.active,
+                                                   manager.active_endpoint, _world_hit):
+                            manager.selected.message = 'Could not activate native point transform'
+                self._drag_start_mouse = None
+                self._drag_started = False
                 self._sync_cursor(context)
                 _redraw(context.window)
                 return {'RUNNING_MODAL'}
@@ -513,18 +626,26 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         if event.alt:
             return {'PASS_THROUGH'}
         if event.type in {'LEFTMOUSE', 'RIGHTMOUSE'} and event.value == 'PRESS':
-            if self._target(context) is None:
-                return {'PASS_THROUGH'}
             if manager.mode == 'IDLE':
                 tick_window(context.window, _parent()._epoch)
-                slot = self._near_endpoint(context)
-                if slot is None:
+                match = self._near_endpoint(context)
+                if match is None:
+                    if event.type == 'LEFTMOUSE' and manager.active_endpoint is not None:
+                        manager.active_endpoint = None
+                        _redraw(context.window)
                     return {'PASS_THROUGH'}
+                index, slot = match
+                manager.activate_endpoint(index, slot)
                 manager.begin_endpoint(slot, 'DRAG' if event.type == 'LEFTMOUSE' else 'REPLACE')
+                self._drag_start_mouse = self._mouse if event.type == 'LEFTMOUSE' else None
+                self._drag_started = False
                 self._sync_cursor(context)
                 hover.clear_window(context.window)
-                self._safe_update(context, force=True)
+                if event.type == 'RIGHTMOUSE':
+                    self._safe_update(context, force=True)
                 return {'RUNNING_MODAL'}
+            if self._target(context) is None:
+                return {'PASS_THROUGH'}
             if event.type == 'LEFTMOUSE' and manager.mode in {'ADD', 'REPLACE'}:
                 self._safe_update(context, force=True)
                 manager.confirm()
@@ -574,6 +695,7 @@ class VIEW3D_OT_final_dimensions_ruler_clear(bpy.types.Operator):
     def execute(self, context):
         manager = collection(context.window)
         if manager and manager.selected:
+            point_edit.stop()
             # A selected unfinished addition is itself the item being removed.
             if manager.mode == 'ADD':
                 manager.cancel_interaction()
@@ -581,6 +703,7 @@ class VIEW3D_OT_final_dimensions_ruler_clear(bpy.types.Operator):
                 manager.cancel_interaction()
                 manager.items.pop(manager.active)
                 manager.active = min(manager.active, len(manager.items)-1)
+                manager.active_endpoint = None
                 manager.recalculate()
             if not manager.items:
                 operator = _sessions.get(context.window.as_pointer())
@@ -601,6 +724,7 @@ class VIEW3D_OT_final_dimensions_ruler_select(bpy.types.Operator):
 
     def execute(self, context):
         manager = collection(context.window)
+        point_edit.stop()
         if manager is None or not manager.select(self.index):
             return {'CANCELLED'}
         if context.area is not None and context.area.type == 'VIEW_3D':
@@ -622,11 +746,35 @@ class VIEW3D_OT_final_dimensions_ruler_endpoint(bpy.types.Operator):
         manager = collection(context.window)
         if manager is None or manager.selected is None or manager.mode == 'ADD':
             return {'CANCELLED'}
+        point_edit.stop()
         manager.cancel_interaction()
         if not manager.begin_endpoint(self.endpoint, 'REPLACE'):
             return {'CANCELLED'}
         if context.area is not None and context.area.type == 'VIEW_3D':
             manager.selected.area_pointer = context.area.as_pointer()
+        _ensure_listener(context)
+        _changed(context)
+        return {'FINISHED'}
+
+
+class VIEW3D_OT_final_dimensions_ruler_activate(bpy.types.Operator):
+    bl_idname = 'view3d.final_dimensions_ruler_activate'
+    bl_label = 'Select Ruler Point'
+    bl_description = 'Keep this ruler point selected for snapping and transforms'
+    bl_options = {'INTERNAL'}
+
+    endpoint: IntProperty(default=0, min=0, max=1, options={'SKIP_SAVE'})
+
+    def execute(self, context):
+        manager = collection(context.window)
+        if manager is None or manager.selected is None or manager.mode == 'ADD':
+            return {'CANCELLED'}
+        if not manager.activate_endpoint(manager.active, self.endpoint):
+            return {'CANCELLED'}
+        hit = getattr(manager.selected, _SLOTS[self.endpoint])
+        if hit is not None and not point_edit.activate(context, manager, manager.active,
+                                                   self.endpoint, _world_hit):
+            manager.selected.message = 'Could not activate native point transform'
         _ensure_listener(context)
         _changed(context)
         return {'FINISHED'}
@@ -641,14 +789,22 @@ class VIEW3D_OT_final_dimensions_ruler_to_cursor(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         manager = collection(context.window)
-        return bool(manager and manager.mode != 'IDLE' and manager.selected)
+        return bool(manager and manager.selected and
+                    (manager.mode != 'IDLE' or manager.active_endpoint is not None))
 
     def execute(self, context):
         manager = collection(context.window)
-        if manager is None or manager.mode == 'IDLE' or manager.selected is None:
+        if manager is None or manager.selected is None or (manager.mode == 'IDLE' and
+                manager.active_endpoint is None):
             return {'CANCELLED'}
-        manager.candidate = _world_hit(context.scene.cursor.location)
-        manager.confirm()
+        if manager.mode == 'IDLE':
+            slot = manager.active_endpoint
+            setattr(manager.selected, _SLOTS[slot], _world_hit(context.scene.cursor.location))
+            manager.selected.errors.pop(slot, None)
+            manager.recalculate()
+        else:
+            manager.candidate = _world_hit(context.scene.cursor.location)
+            manager.confirm()
         operator = _sessions.get(context.window.as_pointer())
         if operator:
             operator._mouse = None
@@ -658,10 +814,38 @@ class VIEW3D_OT_final_dimensions_ruler_to_cursor(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VIEW3D_OT_final_dimensions_cursor_to_ruler_point(bpy.types.Operator):
+    bl_idname = 'view3d.final_dimensions_cursor_to_ruler_point'
+    bl_label = 'Cursor to Ruler Point'
+    bl_description = 'Move the 3D Cursor to the selected ruler point'
+    bl_options = {'INTERNAL'}
+
+    @classmethod
+    def poll(cls, context):
+        manager = collection(context.window)
+        return bool(manager and manager.selected and manager.active_endpoint is not None and
+                    (getattr(manager.selected, _SLOTS[manager.active_endpoint]) is not None or
+                     manager.original is not None))
+
+    def execute(self, context):
+        manager = collection(context.window)
+        if manager is None or manager.selected is None or manager.active_endpoint is None:
+            return {'CANCELLED'}
+        hit = getattr(manager.selected, _SLOTS[manager.active_endpoint]) or manager.original
+        if hit is None:
+            return {'CANCELLED'}
+        context.scene.cursor.location = hit['point']
+        return {'FINISHED'}
+
+
 def tick_window(window, epoch):
     manager = collection(window)
     if manager is None:
         return
+    if manager.context_key != (window.scene.as_pointer(), window.view_layer.as_pointer()):
+        point_edit.stop(restore=False)
+    if point_edit.sync(window, manager, _world_hit):
+        _redraw(window)
     if manager.context_key != (window.scene.as_pointer(), window.view_layer.as_pointer()):
         operator = _sessions.get(window.as_pointer())
         with bpy.context.temp_override(window=window):
@@ -691,12 +875,15 @@ def tick_window(window, epoch):
         manager.recalculate()
     finally:
         parent._measuring = previous
+    point_edit.sync(window, manager, _world_hit)
     _redraw(window)
 
 
 def stop_all(clear=True):
     global _generation
     _generation += 1
+    point_edit.stop()
+    point_edit.cleanup_tagged()
     for window in tuple(bpy.context.window_manager.windows):
         operator = _sessions.get(window.as_pointer())
         if operator:
@@ -708,6 +895,8 @@ def stop_all(clear=True):
 
 
 def prune(live_windows):
+    if point_edit.session_window() is not None and point_edit.session_window() not in live_windows:
+        point_edit.stop(restore=False)
     for pointer in tuple(_states):
         if pointer not in live_windows:
             _states.pop(pointer, None)
@@ -736,6 +925,28 @@ def _visible_state():
     return manager
 
 
+@persistent
+def _before_save(_dummy):
+    # A native proxy is transient UI state and must never enter a saved blend.
+    point_edit.stop()
+    point_edit.cleanup_tagged()
+    for manager in _states.values():
+        manager.active_endpoint = None
+
+
+@persistent
+def _before_history_step(_dummy):
+    point_edit.stop()
+    point_edit.cleanup_tagged()
+    for manager in _states.values():
+        manager.active_endpoint = None
+
+
+@persistent
+def _after_load(_dummy):
+    point_edit.cleanup_tagged()
+
+
 def _project(hit):
     if hit is None:
         return None
@@ -743,15 +954,10 @@ def _project(hit):
         bpy.context.region, bpy.context.region_data, Vector(hit['point']))
 
 
-def _marker(shader, projected, color):
+def _marker(projected, color, radius=5.):
     if projected is None:
         return
-    points = []
-    for i in range(16):
-        a, b = i*math.tau/16, (i+1)*math.tau/16
-        points.extend(((projected.x+5*math.cos(a), projected.y+5*math.sin(a), 0.),
-                       (projected.x+5*math.cos(b), projected.y+5*math.sin(b), 0.)))
-    hover._lines(shader, points, color, 2.)
+    drawing.ring((projected.x, projected.y), radius, color, 2.)
 
 
 def _draw_pixel():
@@ -759,7 +965,6 @@ def _draw_pixel():
     if manager is None:
         return
     context = bpy.context
-    shader = gpu.shader.from_builtin('POLYLINE_UNIFORM_COLOR')
     old_blend, old_depth = gpu.state.blend_get(), gpu.state.depth_test_get()
     try:
         gpu.state.blend_set('ALPHA')
@@ -771,18 +976,25 @@ def _draw_pixel():
             first, second = item.endpoints(manager.slot if preview else None,
                                            manager.candidate if preview else None)
             a, b = _project(first), _project(second)
-            color = (1., .75, .16, 1.) if selected else (.65, .72, .8, .7)
+            color = ruler_style.line_color(context.scene, item, selected)
             if a is not None and b is not None:
-                hover._lines(shader, [(a.x, a.y, 0.), (b.x, b.y, 0.)],
-                             color, 2. if selected else 1.5)
+                drawing.line((a.x, a.y), (b.x, b.y), color,
+                             2. if selected else 1.5)
                 distance = (Vector(second['point'])-Vector(first['point'])).length
-                label = f'{index+1} d: ' + format_length(context.scene, distance)
+                label = ruler_style.label_text(context.scene, item, index, distance)
                 if first.get('warnings') or second.get('warnings'):
                     label += ' *'
                 overlay._text((a.x+b.x)/2+10, (a.y+b.y)/2+10, label, color)
             if selected:
-                _marker(shader, a, (1., .7, .15, 1.))
-                _marker(shader, b, (.35, 1., .55, 1.))
+                _marker(a, color)
+                _marker(b, color)
+                if manager.active_endpoint is not None:
+                    active_point = (a, b)[manager.active_endpoint]
+                    _marker(active_point, (1., 1., 1., 1.), 9.)
+                    if active_point is not None:
+                        overlay._text(active_point.x+12, active_point.y+10,
+                                      f'Active point {manager.active_endpoint+1}',
+                                      (1., 1., 1., 1.))
         item = manager.selected
         if (manager.mode != 'IDLE' and item
                 and context.area.as_pointer() == item.area_pointer):
@@ -807,6 +1019,7 @@ def _draw_pixel():
 
 
 def draw_panel(layout, context):
+    ruler_style.draw_defaults(layout, context)
     box = layout.box()
     row = box.row(align=True)
     row.operator(VIEW3D_OT_final_dimensions_ruler.bl_idname, text='Add Ruler', icon='ADD')
@@ -823,14 +1036,23 @@ def draw_panel(layout, context):
         return
     # Ordinary panel rows use the sidebar's native scrolling, with no RNA collection.
     for index, item in enumerate(manager.items):
-        value = format_length(context.scene, item.distance) if item.distance is not None else 'Pick points'
         op = box.operator(VIEW3D_OT_final_dimensions_ruler_select.bl_idname,
-                          text=f'{index+1}: {value}', depress=index == manager.active,
+                          text=ruler_style.label_text(context.scene, item, index, item.distance),
+                          depress=index == manager.active,
                           icon='DRIVER_DISTANCE')
         op.index = index
     state = manager.selected
     if state is None:
         return
+    ruler_style.draw_selected(box, context)
+    row = box.row(align=True)
+    row.enabled = manager.mode != 'ADD'
+    for slot in (0, 1):
+        op = row.operator(VIEW3D_OT_final_dimensions_ruler_activate.bl_idname,
+                          text=f'Select Point {slot+1}',
+                          depress=manager.active_endpoint == slot,
+                          icon='RADIOBUT_ON' if manager.active_endpoint == slot else 'RADIOBUT_OFF')
+        op.endpoint = slot
     row = box.row(align=True)
     row.enabled = manager.mode != 'ADD'
     for slot, hit in enumerate((state.first, state.second)):
@@ -838,13 +1060,17 @@ def draw_panel(layout, context):
                           text=f'Pick Point {slot+1}' if hit is None else f'Replace {slot+1}')
         op.endpoint = slot
     if state.distance is not None:
-        box.label(text='d: '+format_length(context.scene, state.distance))
+        box.label(text=ruler_style.label_text(context.scene, state, manager.active, state.distance))
     if manager.mode != 'IDLE':
         operator = _sessions.get(context.window.as_pointer())
         box.label(text='Release LMB for Shift+S menu' if operator and operator._pending_pie
                   else 'Release to place point' if manager.mode == 'DRAG'
                   else f'Pick point {manager.slot+1} · Esc cancel')
         box.label(text='Shift+S: 3D Cursor')
+        box.operator(VIEW3D_OT_final_dimensions_ruler_to_cursor.bl_idname,
+                     text='Point to 3D Cursor', icon='CURSOR')
+    elif manager.active_endpoint is not None:
+        box.label(text=f'Active point {manager.active_endpoint+1} · Shift+S · Esc deselect')
         box.operator(VIEW3D_OT_final_dimensions_ruler_to_cursor.bl_idname,
                      text='Point to 3D Cursor', icon='CURSOR')
     else:
@@ -861,7 +1087,17 @@ def draw_panel(layout, context):
 
 _CLASSES = (VIEW3D_OT_final_dimensions_ruler, VIEW3D_OT_final_dimensions_ruler_clear,
             VIEW3D_OT_final_dimensions_ruler_select, VIEW3D_OT_final_dimensions_ruler_endpoint,
-            VIEW3D_OT_final_dimensions_ruler_to_cursor)
+            VIEW3D_OT_final_dimensions_ruler_activate,
+            VIEW3D_OT_final_dimensions_ruler_to_cursor,
+            VIEW3D_OT_final_dimensions_cursor_to_ruler_point)
+
+
+def _cleanup_after_registration():
+    # Extension enable runs register() with bpy.data restricted. Scene IDs are
+    # available only after Blender returns to its normal event loop.
+    if _registered and not point_edit.active():
+        point_edit.cleanup_tagged()
+    return None
 
 
 def register():
@@ -877,12 +1113,30 @@ def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
     _registered = True
+    if not bpy.app.timers.is_registered(_cleanup_after_registration):
+        bpy.app.timers.register(_cleanup_after_registration, first_interval=0.0)
+    if _before_save not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_before_save)
+    for handlers, callback in ((bpy.app.handlers.undo_pre, _before_history_step),
+                               (bpy.app.handlers.redo_pre, _before_history_step),
+                               (bpy.app.handlers.load_post, _after_load)):
+        if callback not in handlers:
+            handlers.append(callback)
     _handles.append(bpy.types.SpaceView3D.draw_handler_add(_draw_pixel, (), 'WINDOW', 'POST_PIXEL'))
 
 
 def unregister():
     global _registered
     _registered = False
+    if bpy.app.timers.is_registered(_cleanup_after_registration):
+        bpy.app.timers.unregister(_cleanup_after_registration)
+    if _before_save in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_before_save)
+    for handlers, callback in ((bpy.app.handlers.undo_pre, _before_history_step),
+                               (bpy.app.handlers.redo_pre, _before_history_step),
+                               (bpy.app.handlers.load_post, _after_load)):
+        if callback in handlers:
+            handlers.remove(callback)
     stop_all()
     for handle in _handles:
         bpy.types.SpaceView3D.draw_handler_remove(handle, 'WINDOW')

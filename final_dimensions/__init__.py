@@ -9,13 +9,13 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty
 
 from .measure import format_length, measure_object
-from . import overlay, hover, ruler
+from . import overlay, hover, ruler, ruler_style, offset_cut
 
 
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 7, 0),
+    "version": (0, 8, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
     "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
@@ -241,6 +241,7 @@ class VIEW3D_PT_final_dimensions(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         ruler.draw_panel(layout, context)
+        offset_cut.draw_panel(layout, context)
         layout.prop(
             context.window_manager,
             "final_dimensions_show_overlay",
@@ -359,7 +360,9 @@ def register():
     bpy.utils.register_class(VIEW3D_PT_final_dimensions_object)
     overlay.register()
     hover.register()
+    ruler_style.register()
     ruler.register()
+    offset_cut.register()
     _registered = True
     for handlers, callback in _HANDLERS:
         if callback not in handlers:
@@ -377,9 +380,12 @@ def unregister():
             handlers.remove(callback)
     _cache.clear()
     _draw_interest.clear()
-    overlay.unregister()
-    ruler.unregister()
-    hover.unregister()
+    # Remove consumers of the properties before unregistering their RNA types.
     bpy.utils.unregister_class(VIEW3D_PT_final_dimensions_object)
     bpy.utils.unregister_class(VIEW3D_PT_final_dimensions)
+    offset_cut.unregister()
+    overlay.unregister()
+    ruler.unregister()
+    ruler_style.unregister()
+    hover.unregister()
     del bpy.types.WindowManager.final_dimensions_show_overlay
