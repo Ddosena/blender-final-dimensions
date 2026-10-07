@@ -35,7 +35,10 @@ def main():
     if match is None:
         raise RuntimeError('Could not read Blender version')
     blender_version = match.group(1) + ('-LTS' if match.group(2) else '')
-    report = {'blender': blender_version, 'addon': version, 'checks': [], 'unverified': []}
+    report = {'blender': blender_version, 'addon': version, 'checks': [],
+              'interactive_tests_run': args.gui, 'unverified': []}
+    if not args.gui:
+        report['unverified'].append('Interactive viewport scenarios were not run (no --gui)')
     environment = os.environ.copy()
     environment['BLENDER_USER_RESOURCES'] = str(artifacts / 'profiles' / ('checks-'+blender_version))
     startup = None
@@ -58,9 +61,17 @@ def main():
 
     for script in ('test_blender', 'test_extra', 'test_direction', 'test_section',
                    'test_cursor_diameter', 'test_surface', 'test_snapping',
-                   'test_vertex_tracking', 'test_offset_cut', 'test_ruler_style'):
+                   'test_vertex_tracking', 'test_vertex_tracking_native_ops',
+                   'test_vertex_ruler_deferred',
+                   'test_loop_offset', 'test_ruler_style'):
         run(script, ['--background', '--factory-startup', '--python-exit-code', '1',
                      '--python', str(ROOT / 'tests' / (script+'.py'))])
+        if script == 'test_loop_offset':
+            result = json.loads((artifacts / f'loop-offset-{blender_version}.json').read_text(encoding='utf-8'))
+            assert result['status'] == 'PASS', result
+            native_gate = result.get('native_loopcut_slide', '')
+            if native_gate.startswith('UNVERIFIED:'):
+                report['unverified'].append(native_gate)
     run('build', ['--factory-startup', '--command', 'extension', 'build',
                   '--source-dir', str(ROOT / 'final_dimensions'), '--output-dir', str(ROOT / 'dist')])
     package = ROOT / 'dist' / f'final_dimensions-{version}.zip'
@@ -75,8 +86,6 @@ def main():
                                ('test_active_ruler_live', 'active-ruler-live'),
                                ('test_vertex_ruler_live', 'vertex-ruler-live'),
                                ('test_smooth_ruler_live', 'smooth-ruler-live'),
-                               ('test_offset_cut_live', 'offset-cut-live'),
-                               ('test_offset_cut_panel_live', 'offset-cut-panel-live'),
                                ('test_ruler_style_live', 'ruler-style-live'),
                                ('test_ruler_display_live', 'ruler-display-live'),
                                ('test_ruler_style_disable_live', 'ruler-style-disable-live')):

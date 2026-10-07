@@ -32,16 +32,16 @@ assert bpy.app.timers.is_registered(module._timer_tick)
 assert module.ruler._registered and len(module.ruler._handles) == 1
 assert hasattr(bpy.types.Scene, 'final_dimensions_ruler_appearance')
 bpy.ops.view3d.final_dimensions_ruler_style.get_rna_type()
-bpy.ops.view3d.final_dimensions_offset_cut.get_rna_type()
+bpy.ops.mesh.final_dimensions_loop_offset.get_rna_type()
 bpy.ops.view3d.final_dimensions_ruler_activate.get_rna_type()
-assert module.offset_cut._draw_handle is not None
 bpy.ops.preferences.addon_disable(module=module_name)
 assert not bpy.app.timers.is_registered(module._timer_tick)
 assert module._on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post
 assert not module._cache
 assert not module.ruler._registered and not module.ruler._handles
 assert not module.ruler._sessions and not module.ruler._states
-assert module.offset_cut._draw_handle is None and not module.offset_cut._sessions
+assert not module.loop_offset._preview_handles
+assert module.loop_offset._on_load_pre not in bpy.app.handlers.load_pre
 assert not hasattr(bpy.types.Scene, 'final_dimensions_ruler_appearance')
 bpy.ops.preferences.addon_enable(module=module_name)
 assert bpy.app.handlers.depsgraph_update_post.count(module._on_depsgraph_update) == 1

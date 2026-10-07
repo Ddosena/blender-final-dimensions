@@ -13,6 +13,7 @@ from mathutils import Vector
 
 from . import drawing, overlay, hover, point_edit, ruler_style
 from .snapping import SnapPicker, SUPPORTED_ELEMENTS
+from .vertex_tracking import VertexResolutionDeferred
 
 
 _states = {}
@@ -139,6 +140,7 @@ class RulerCollection:
         self.original = None
         self.picker = None
         self.epoch = -1
+        self._pending_vertex_resolution = False
         self.query_key = None
 
     @property
@@ -164,9 +166,10 @@ class RulerCollection:
             self.picker = SnapPicker(context, epoch)
         else:
             self.picker.refresh(context, epoch)
-        if self.epoch == epoch:
+        if self.epoch == epoch and not self._pending_vertex_resolution:
             return
         self.epoch = epoch
+        self._pending_vertex_resolution = False
         self.query_key = None
         self.candidate = None
         # An unavailable anchor affects only its own endpoint.
@@ -177,6 +180,8 @@ class RulerCollection:
                     continue
                 try:
                     hit['point'] = self.resolve_hit(context, hit)
+                except VertexResolutionDeferred:
+                    self._pending_vertex_resolution = True
                 except (ValueError, ReferenceError, RuntimeError) as exc:
                     setattr(item, attr, None)
                     item.errors[slot] = f'Point {slot+1}: {exc}. Pick it again.'
@@ -187,6 +192,8 @@ class RulerCollection:
         if self.original is not None:
             try:
                 self.original['point'] = self.resolve_hit(context, self.original)
+            except VertexResolutionDeferred:
+                self._pending_vertex_resolution = True
             except (ValueError, ReferenceError, RuntimeError):
                 self.original = None
         self.recalculate()
@@ -855,7 +862,7 @@ def tick_window(window, epoch):
                 _states.pop(window.as_pointer(), None)
         _redraw(window)
         return
-    if manager.epoch == epoch:
+    if manager.epoch == epoch and not manager._pending_vertex_resolution:
         return
     parent = _parent()
     previous = parent._measuring

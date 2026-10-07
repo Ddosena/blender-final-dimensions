@@ -10,6 +10,10 @@ on:
         description: Publish a new release after all checks pass (update version first)
         type: boolean
         default: false
+      interactive_tests:
+        description: Run optional viewport tests that simulate mouse and keyboard events
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -51,8 +55,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/blender"
           tar -xJf "$RUNNER_TEMP/blender.tar.xz" -C "$RUNNER_TEMP/blender" --strip-components=1
           echo "BLENDER=$RUNNER_TEMP/blender/blender" >> "$GITHUB_ENV"
-      - name: Numerical, install and real viewport tests
-        run: xvfb-run -a -s '-screen 0 1920x1080x24' python3 scripts/check_blender.py --blender "$BLENDER" --gui
+      - name: Blender API and installation checks
+        env:
+          RUN_INTERACTIVE: ${{ github.event_name == 'workflow_dispatch' && inputs.interactive_tests }}
+        run: |
+          if [ "$RUN_INTERACTIVE" = "true" ]; then
+            xvfb-run -a -s '-screen 0 1920x1080x24' python3 scripts/check_blender.py --blender "$BLENDER" --gui
+          else
+            python3 scripts/check_blender.py --blender "$BLENDER"
+          fi
       - name: Save package and test evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

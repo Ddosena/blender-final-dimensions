@@ -1,44 +1,74 @@
-"""Persistent identities for Original mesh vertices used by ruler anchors.
+"""Original vertex anchors with no retained BMesh or BMVert wrappers.
 
-The mesh attribute stores identity, never geometry. Live BMesh references resolve
-copies of that attribute made by edit operations such as Inset. An ambiguous ID
-without a surviving reference is deliberately treated as a missing endpoint.
+Native Edit operators and Undo can replace an EditMesh while Python still owns
+its BMesh wrapper. Releasing that stale wrapper can crash Blender. Everything
+kept between events here is a scalar, including same-session element tokens.
 """
 from __future__ import annotations
 
+import hashlib
+
 import bmesh
+import bpy
 
 
 ATTRIBUTE = '.final_dimensions_vertex_id'
 LAYER_KEY = '_final_dimensions_vertex_id_layer'
 NEXT_KEY = '_final_dimensions_vertex_id_next'
 MAX_ID = 2**31 - 1
+_last_issued = 0
+_issued_ids_by_mesh = {}
 
 
-def _mesh_key(mesh):
-    return (mesh.as_pointer(), int(mesh.session_uid))
+class VertexResolutionDeferred(RuntimeError):
+    """A native modal edit is in progress; retain and retry this anchor."""
+
+
+def _topology(mesh, bm=None):
+    """A mode-independent connectivity check, unaffected by deformation."""
+    if bm is not None:
+        bm.verts.ensure_lookup_table()
+        bm.verts.index_update()
+        edges = [tuple(v.index for v in edge.verts) for edge in bm.edges]
+        faces = [tuple(v.index for v in face.verts) for face in bm.faces]
+        count = len(bm.verts)
+    else:
+        edges = [edge.vertices for edge in mesh.edges]
+        faces = [tuple(mesh.loops[i].vertex_index for i in range(face.loop_start,
+                  face.loop_start + face.loop_total)) for face in mesh.polygons]
+        count = len(mesh.vertices)
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(f'{count}|'.encode('ascii'))
+    # Element ordering and face winding may change on a mode conversion.
+    edge_keys = sorted(tuple(sorted(pair)) for pair in edges)
+    face_keys = sorted(tuple(sorted(loop)) for loop in faces)
+    for kind, collection in ((b'E', edge_keys), (b'F', face_keys)):
+        digest.update(kind)
+        for entry in collection:
+            digest.update(','.join(map(str, entry)).encode('ascii'))
+            digest.update(b';')
+    return digest.hexdigest()
+
+
+def _may_write_edit_identity(operators=None):
+    """Do not change EditMesh CustomData while a native modal op owns it."""
+    if operators is None:
+        window = bpy.context.window
+        if window is None:
+            return True
+        operators = window.modal_operators
+    for operator in operators:
+        identifier = getattr(operator, 'bl_idname', '')
+        if not identifier:
+            identifier = getattr(getattr(operator, 'bl_rna', None), 'identifier', '')
+        identifier = str(identifier).lower().replace('_ot_', '.')
+        if identifier not in {'view3d.final_dimensions_ruler',
+                              'view3d.final_dimensions_hover'}:
+            return False
+    return True
 
 
 class VertexTracker:
-    def __init__(self):
-        # Mesh references are deliberately absent: a removed datablock can be
-        # collected. Invalid BMVerts are discarded on the next access.
-        self._edit_refs = {}
-        self._edit_bms = {}
-        self._known_meshes = set()
-
-    def _refs_for(self, mesh, bm):
-        key = _mesh_key(mesh)
-        old_bm = self._edit_bms.get(key)
-        try:
-            same_session = old_bm is bm and bm.is_valid
-        except (ReferenceError, RuntimeError):
-            same_session = False
-        if not same_session:
-            self._edit_bms[key] = bm
-            self._edit_refs[key] = {}
-        return self._edit_refs[key]
-
     @staticmethod
     def _layer_name(mesh, create):
         name = mesh.get(LAYER_KEY)
@@ -61,11 +91,13 @@ class VertexTracker:
 
     @staticmethod
     def _next_id(mesh, used):
-        number = max(int(mesh.get(NEXT_KEY, 1)), max(used, default=0) + 1)
+        global _last_issued
+        number = max(int(mesh.get(NEXT_KEY, 1)), _last_issued + 1,
+                     max(used, default=0) + 1)
         if number > MAX_ID:
             raise ValueError('Ruler vertex identity limit exceeded')
         mesh[NEXT_KEY] = number + 1
-        used.add(number)
+        _last_issued = number
         return number
 
     @staticmethod
@@ -74,6 +106,8 @@ class VertexTracker:
         layer = bm.verts.layers.int.get(name)
         if layer is None and create:
             layer = bm.verts.layers.int.new(name)
+        bm.verts.ensure_lookup_table()
+        bm.verts.index_update()
         return bm, layer
 
     @staticmethod
@@ -85,116 +119,54 @@ class VertexTracker:
             raise ValueError('Ruler vertex identity attribute has changed')
         return attribute
 
-    def _edit_ids(self, mesh, name, create=False):
-        bm, layer = self._edit_members(mesh, name, create)
-        if layer is None:
-            return bm, None, (), {}
-        bm.verts.ensure_lookup_table()
-        bm.verts.index_update()
-        verts = tuple(bm.verts)
-        groups = {}
-        for vert in verts:
-            value = int(vert[layer])
-            if value > 0:
-                groups.setdefault(value, []).append(vert)
-        return bm, layer, verts, groups
-
-    def observe_edit(self, owner):
-        """Record unique IDs before a later edit can copy them to new vertices."""
-        if owner.mode != 'EDIT':
-            return
-        mesh = owner.data
-        if _mesh_key(mesh) not in self._known_meshes:
-            return
-        name = self._layer_name(mesh, False)
-        if name is None:
-            return
-        bm, _layer, _verts, groups = self._edit_ids(mesh, name)
-        refs = self._refs_for(mesh, bm)
-        for value, members in groups.items():
-            if len(members) == 1 and value not in refs:
-                refs[value] = members[0]
-
     @staticmethod
-    def _live_ref(ref, verts):
-        try:
-            return ref if ref is not None and ref.is_valid and ref in verts else None
-        except (ReferenceError, RuntimeError):
-            return None
-
-    def _repair_edit_duplicates(self, mesh, bm, layer, verts, groups, protected=None):
-        """Keep a known surviving BMVert's ID; remove only copied IDs."""
-        refs = self._refs_for(mesh, bm)
-        used = set(groups)
-        changed = False
-        for value, members in groups.items():
-            if len(members) == 1:
-                old_ref = refs.get(value)
-                if old_ref is not None and old_ref is not members[0]:
-                    # A deleted vertex's copied ID must not adopt its anchor.
-                    # Do this even when the copy is now the only vertex with
-                    # that ID; the old BMesh session still proves identity.
-                    new_id = self._next_id(mesh, used)
-                    members[0][layer] = new_id
-                    refs[new_id] = members[0]
-                    changed = True
-                else:
-                    refs[value] = members[0]
-                continue
-            keeper = self._live_ref(refs.get(value), verts)
-            if protected is not None and protected[0] == value:
-                target = self._live_ref(protected[1], verts)
-                if target in members:
-                    keeper = target
-            # Without a known original, all copies lose this ID. Existing
-            # anchors fail safely instead of silently following a new vertex.
-            for member in members:
-                if member is keeper:
-                    continue
-                new_id = self._next_id(mesh, used)
-                member[layer] = new_id
-                refs[new_id] = member
-                changed = True
-            if keeper is None:
-                refs.pop(value, None)
-            else:
-                refs[value] = keeper
-        if changed:
-            bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+    def _remember_edit(anchor, bm, vertex, mesh):
+        anchor['edit_mesh_token'] = hash(bm)
+        anchor['edit_vertex_token'] = hash(vertex)
+        anchor['edit_neighbor_tokens'] = tuple(sorted(
+            hash(edge.other_vert(vertex)) for edge in vertex.link_edges))
+        anchor['verified_topology'] = _topology(mesh, bm)
 
     def bind(self, owner, index):
-        """Return identity fields for a picked Original vertex."""
         mesh = owner.data
-        self._known_meshes.add(_mesh_key(mesh))
+        issued = _issued_ids_by_mesh.setdefault(int(mesh.session_uid), set())
+        if owner.mode == 'EDIT' and not _may_write_edit_identity():
+            raise ValueError('Finish the active mesh operation before binding a vertex')
         name = self._layer_name(mesh, True)
-        identity = {'mesh_uid': int(mesh.session_uid), 'mesh_pointer': mesh.as_pointer(),
-                    'vertex_layer': name}
+        identity = {'mesh_uid': int(mesh.session_uid),
+                    'mesh_pointer': mesh.as_pointer(), 'vertex_layer': name}
         if owner.mode == 'EDIT':
-            bm, layer, verts, groups = self._edit_ids(mesh, name, True)
-            if not 0 <= index < len(verts):
+            bm, layer = self._edit_members(mesh, name, True)
+            if not 0 <= index < len(bm.verts):
                 raise ValueError('Picked vertex disappeared')
-            self._repair_edit_duplicates(mesh, bm, layer, verts, groups)
-            vertex = verts[index]
+            vertex = bm.verts[index]
             value = int(vertex[layer])
+            if value > 0 and sum(int(part[layer]) == value for part in bm.verts) != 1:
+                if value in issued:
+                    raise ValueError('Picked vertex identity was copied and is ambiguous')
+                value = 0  # Interpolated CustomData is not an issued identity.
             if value <= 0:
-                value = self._next_id(mesh, set(groups))
+                used = {int(part[layer]) for part in bm.verts if part[layer] > 0}
+                value = self._next_id(mesh, used)
                 vertex[layer] = value
                 bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
-            self._refs_for(mesh, bm)[value] = vertex
-            identity['vertex_ref'] = vertex
-            identity['edit_bmesh'] = bm
+            self._remember_edit(identity, bm, vertex, mesh)
         else:
             attribute = self._object_members(mesh, name, True)
             if not 0 <= index < len(attribute.data):
                 raise ValueError('Picked vertex disappeared')
             value = int(attribute.data[index].value)
-            if value > 0 and sum(int(entry.value) == value for entry in attribute.data) != 1:
-                raise ValueError('Picked vertex identity is ambiguous')
+            if value > 0 and sum(int(part.value) == value for part in attribute.data) != 1:
+                if value in issued:
+                    raise ValueError('Picked vertex identity was copied and is ambiguous')
+                value = 0
             if value <= 0:
-                used = {int(entry.value) for entry in attribute.data if entry.value > 0}
+                used = {int(part.value) for part in attribute.data if part.value > 0}
                 value = self._next_id(mesh, used)
                 attribute.data[index].value = value
+            identity['verified_topology'] = _topology(mesh)
         identity['vertex_id'] = value
+        issued.add(value)
         return identity
 
     def resolve(self, owner, anchor):
@@ -209,37 +181,59 @@ class VertexTracker:
         if value <= 0:
             raise ValueError('Anchor vertex identity is invalid')
         if owner.mode == 'EDIT':
-            bm, layer, verts, groups = self._edit_ids(mesh, name)
+            # The native operator may own a provisional or replaced EditMesh.
+            # Even index_update() is too early until it has finished or canceled.
+            if not _may_write_edit_identity():
+                raise VertexResolutionDeferred('Vertex resolution awaits the mesh operation')
+            bm, layer = self._edit_members(mesh, name, False)
             if layer is None:
                 raise ValueError('Anchor vertex identity layer is missing')
-            prior_bm = anchor.get('edit_bmesh')
-            try:
-                if prior_bm is bm and prior_bm.is_valid and self._live_ref(anchor.get('vertex_ref'), verts) is None:
+            matches = [part for part in bm.verts if int(part[layer]) == value]
+            token = anchor.get('edit_vertex_token')
+            same_session = anchor.get('edit_mesh_token') == hash(bm) and token is not None
+            if same_session:
+                selected = [part for part in matches if hash(part) == token]
+                if len(selected) != 1:
                     raise ValueError('Anchor vertex was deleted')
-            except (ReferenceError, RuntimeError):
-                pass
-            ref = self._live_ref(anchor.get('vertex_ref'), verts)
-            if ref is not None and int(ref[layer]) != value:
-                raise ValueError('Anchor vertex identity changed')
-            self._repair_edit_duplicates(mesh, bm, layer, verts, groups, (value, ref))
-            members = [v for v in verts if int(v[layer]) == value]
-            if len(members) != 1:
-                raise ValueError('Anchor vertex was deleted or became ambiguous')
-            vertex = members[0]
-            anchor['vertex_ref'] = vertex
-            anchor['edit_bmesh'] = bm
-            self._refs_for(mesh, bm)[value] = vertex
+                vertex = selected[0]
+                old_neighbors = set(anchor.get('edit_neighbor_tokens', ()))
+                if old_neighbors:
+                    if not old_neighbors.intersection(
+                            hash(edge.other_vert(vertex)) for edge in vertex.link_edges):
+                        raise ValueError('Anchor vertex was deleted or replaced')
+                elif _topology(mesh, bm) != anchor.get('verified_topology'):
+                    raise ValueError('Anchor topology changed around an isolated vertex')
+                if len(matches) != 1:
+                    if not old_neighbors:
+                        raise ValueError('Anchor vertex identity was copied and is ambiguous')
+                    used = {int(part[layer]) for part in bm.verts if part[layer] > 0}
+                    for part in matches:
+                        if part is vertex:
+                            continue
+                        fresh = self._next_id(mesh, used)
+                        part[layer] = fresh
+                        used.add(fresh)
+                    bmesh.update_edit_mesh(mesh, loop_triangles=False, destructive=False)
+            else:
+                if _topology(mesh, bm) != anchor.get('verified_topology'):
+                    raise ValueError('Anchor topology changed before vertex identity could be verified')
+                if len(matches) != 1:
+                    raise ValueError('Anchor vertex was deleted or its identity was copied')
+                vertex = matches[0]
+            self._remember_edit(anchor, bm, vertex, mesh)
             return tuple(owner.matrix_world @ vertex.co)
         attribute = self._object_members(mesh, name, False)
         if attribute is None:
             raise ValueError('Anchor vertex identity layer is missing')
-        matches = [i for i, entry in enumerate(attribute.data) if int(entry.value) == value]
+        if _topology(mesh) != anchor.get('verified_topology'):
+            raise ValueError('Anchor topology changed before vertex identity could be verified')
+        matches = [i for i, part in enumerate(attribute.data) if int(part.value) == value]
         if len(matches) != 1:
-            raise ValueError('Anchor vertex was deleted or became ambiguous')
+            raise ValueError('Anchor vertex was deleted or its identity was copied')
+        anchor.pop('edit_mesh_token', None)
+        anchor.pop('edit_vertex_token', None)
+        anchor.pop('edit_neighbor_tokens', None)
         return tuple(owner.matrix_world @ mesh.vertices[matches[0]].co)
 
 
-# Windows can hold independent ruler collections for the same mesh. They must
-# share edit references while repairing copied IDs, or one window could replace
-# an ID still owned by an anchor in another window.
 TRACKER = VertexTracker()

@@ -203,9 +203,6 @@ class SnapPicker(ScenePicker):
         changed = super().refresh(context, epoch)
         if changed:
             self._original_bounds = {}
-            for record in self.records:
-                if record['key'][0] == 'OBJECT':
-                    self._vertex_tracker.observe_edit(self._owner(context, record))
         return changed
 
     def _feature_geometry(self, context, record, source):

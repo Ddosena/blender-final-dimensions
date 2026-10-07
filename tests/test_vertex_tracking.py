@@ -62,15 +62,16 @@ def test_inset_and_mode_cycles():
     assert [tuple(v.co) for v in obj.data.vertices] == original
     bpy.ops.object.mode_set(mode='EDIT')
     refresh(p)  # A real ruler receives the mode-change depsgraph update.
-    bm = bmesh.from_edit_mesh(obj.data)
-    bm.verts.ensure_lookup_table()
-    outer = bm.verts[0]
-    other = bm.verts[1]
-    bpy.ops.mesh.inset(thickness=.25, depth=0)
-    refresh(p)
-    assert outer.is_valid and other.is_valid
     close(p.resolve(bpy.context, a), original[0])
     close(p.resolve(bpy.context, b), original[1])
+    bpy.ops.mesh.inset(thickness=.25, depth=0)
+    refresh(p)
+    close(p.resolve(bpy.context, a), original[0])
+    close(p.resolve(bpy.context, b), original[1])
+    bm = bmesh.from_edit_mesh(obj.data)
+    layer = bm.verts.layers.int.get(a['vertex_layer'])
+    outer = next(v for v in bm.verts if int(v[layer]) == a['vertex_id'])
+    other = next(v for v in bm.verts if int(v[layer]) == b['vertex_id'])
     inner = [v for v in bm.verts if v not in {outer, other}
              and abs(v.co.x) < 1 and abs(v.co.y) < 1]
     assert len(inner) == 4, len(inner)
@@ -83,25 +84,26 @@ def test_inset_and_mode_cycles():
     bmesh.update_edit_mesh(obj.data)
     refresh(p)
     close(p.resolve(bpy.context, a), tuple(outer.co))
+    close(p.resolve(bpy.context, b), tuple(other.co))
     close(p.resolve(bpy.context, inner_anchor), tuple(inner_vert.co))
     distance = math.dist(p.resolve(bpy.context, a), p.resolve(bpy.context, b))
     assert not math.isclose(distance, math.dist(original[0], original[1]))
     print('PASS inset surviving and new vertices follow independently', flush=True)
 
-    # A second Inset copies POINT attributes again. The original BMesh
-    # references identify exactly which copies retain each ruler ID.
+    # A second native Inset may rebuild EditMesh; retain no Python BMesh refs.
     for face in bm.faces:
         face.select_set(False)
     selected = next(face for face in bm.faces if inner_vert in face.verts and
                     all(abs(v.co.x) < 1.1 and abs(v.co.y) < 1.1 for v in face.verts))
     selected.select_set(True)
     bmesh.update_edit_mesh(obj.data)
+    expected_outer, expected_other = tuple(outer.co), tuple(other.co)
+    del selected, face, outer, other, inner_vert, inner, layer, bm
     bpy.ops.mesh.inset(thickness=.08, depth=0)
     refresh(p)
-    close(p.resolve(bpy.context, a), tuple(outer.co))
-    if inner_vert.is_valid:
-        close(p.resolve(bpy.context, inner_anchor), tuple(inner_vert.co))
-    expected_outer, expected_other = tuple(outer.co), tuple(other.co)
+    close(p.resolve(bpy.context, a), expected_outer)
+    close(p.resolve(bpy.context, b), expected_other)
+    p.resolve(bpy.context, inner_anchor)
     bpy.ops.object.mode_set(mode='OBJECT')
     refresh(p)
     close(p.resolve(bpy.context, a), expected_outer)
@@ -110,6 +112,8 @@ def test_inset_and_mode_cycles():
 
     bpy.ops.object.mode_set(mode='EDIT')
     refresh(p)
+    p.resolve(bpy.context, a)
+    p.resolve(bpy.context, b)
     bm = bmesh.from_edit_mesh(obj.data)
     # Deleting an unrelated vertex changes later BMesh indices. IDs prevent
     # silently following the vertex now occupying an old index.
@@ -135,6 +139,7 @@ def test_inset_and_mode_cycles():
     else:
         raise AssertionError('Deleted vertex remained anchored')
     assert p.resolve(bpy.context, b) is not None
+    del target, unrelated, layer, bm
     print('PASS deleted vertex invalidates only its own endpoint', flush=True)
 
 
@@ -153,12 +158,13 @@ def test_unobserved_duplicate_fails_safely():
     layer = bm.verts.layers.int.get(anchor['vertex_layer'])
     copy[layer] = anchor['vertex_id']
     bmesh.update_edit_mesh(obj.data, destructive=True)
+    del copy, layer, bm
     bpy.ops.object.mode_set(mode='OBJECT')  # No edit refresh could record identity.
     refresh(p)
     try:
         p.resolve(bpy.context, anchor)
     except ValueError as exc:
-        assert 'ambiguous' in str(exc)
+        assert 'topology' in str(exc) or 'ambiguous' in str(exc)
     else:
         raise AssertionError('Duplicate vertex ID silently rebound')
     print('PASS unobserved duplicate invalidates instead of guessing', flush=True)
@@ -173,6 +179,7 @@ def test_deleted_original_with_surviving_copy():
     anchor = hit(p, tuple(obj.data.vertices[0].co))['anchor']
     bpy.ops.object.mode_set(mode='EDIT')
     refresh(p)
+    p.resolve(bpy.context, anchor)
     bm = bmesh.from_edit_mesh(obj.data)
     bm.verts.ensure_lookup_table()
     original = next(v for v in bm.verts if v.index == anchor['feature'])
@@ -192,7 +199,8 @@ def test_deleted_original_with_surviving_copy():
     copied_index = next(i for i, v in enumerate(bm.verts) if v is copy)
     new_anchor = hit(p, tuple(copy.co))['anchor']
     assert new_anchor['feature'] == copied_index
-    assert new_anchor['vertex_id'] != anchor['vertex_id']
+    assert new_anchor['vertex_id'] == anchor['vertex_id']
+    del new_anchor, copied_index, copy, original, layer, bm
     print('PASS deletion and copied ID never rebind old anchor', flush=True)
 
 
@@ -206,8 +214,10 @@ def test_native_edit_transforms():
     original = hit(p, tuple(obj.data.vertices[0].co))['anchor']
     bpy.ops.object.mode_set(mode='EDIT')
     refresh(p)
+    p.resolve(bpy.context, original)
     bpy.ops.mesh.inset(thickness=.25, depth=0)
     refresh(p)
+    p.resolve(bpy.context, original)
     bm = bmesh.from_edit_mesh(obj.data)
     inner = next(v for v in bm.verts if abs(v.co.x) < 1 and abs(v.co.y) < 1)
     inner_anchor = hit(p, tuple(inner.co))['anchor']
@@ -221,19 +231,52 @@ def test_native_edit_transforms():
         vert.select_set(False)
     inner.select_set(True)
     bmesh.update_edit_mesh(obj.data)
+    del face, edge, vert, inner, bm
     assert bpy.ops.transform.translate(value=(.2, 0, 0)) == {'FINISHED'}
     refresh(p)
     moved = p.resolve(bpy.context, inner_anchor)
     close(moved, (before_inner[0]+.2, before_inner[1], before_inner[2]))
     close(p.resolve(bpy.context, original), before_outer)
+    bm = bmesh.from_edit_mesh(obj.data)
     for vert in bm.verts:
         vert.select_set(abs(vert.co.x) < 1 and abs(vert.co.y) < 1)
     bmesh.update_edit_mesh(obj.data)
+    del vert, bm
     assert bpy.ops.transform.resize(value=(1.25, 1.25, 1.25)) == {'FINISHED'}
     refresh(p)
     close(p.resolve(bpy.context, original), before_outer)
     assert not np.allclose(p.resolve(bpy.context, inner_anchor), moved)
     print('PASS native translate and scale preserve vertex anchors', flush=True)
+
+
+def test_deleted_then_recreated_same_id():
+    bpy.ops.object.mode_set(mode='OBJECT')
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    bpy.ops.mesh.primitive_plane_add(size=2)
+    obj = bpy.context.object
+    p = SnapPicker(bpy.context, EPOCH)
+    anchor = hit(p, tuple(obj.data.vertices[0].co))['anchor']
+    bpy.ops.object.mode_set(mode='EDIT')
+    refresh(p)
+    p.resolve(bpy.context, anchor)
+    bm = bmesh.from_edit_mesh(obj.data)
+    layer = bm.verts.layers.int.get(anchor['vertex_layer'])
+    original = next(v for v in bm.verts if int(v[layer]) == anchor['vertex_id'])
+    position = tuple(original.co)
+    bmesh.ops.delete(bm, geom=[original], context='VERTS')
+    replacement = bm.verts.new(position)
+    replacement[layer] = anchor['vertex_id']
+    bmesh.update_edit_mesh(obj.data, destructive=True)
+    refresh(p)
+    try:
+        p.resolve(bpy.context, anchor)
+    except ValueError as exc:
+        assert 'deleted' in str(exc) or 'topology' in str(exc)
+    else:
+        raise AssertionError('Anchor jumped to a recreated vertex with its old ID')
+    del replacement, original, layer, bm
+    print('PASS recreated unique ID cannot impersonate deleted vertex', flush=True)
 
 
 def test_inset_undo():
@@ -247,6 +290,7 @@ def test_inset_undo():
     anchor = hit(p, initial)['anchor']
     bpy.ops.object.mode_set(mode='EDIT')
     refresh(p)
+    p.resolve(bpy.context, anchor)
     bpy.ops.ed.undo_push(message='before inset')
     assert bpy.ops.mesh.inset(thickness=.2, depth=0) == {'FINISHED'}
     refresh(p)
@@ -284,6 +328,7 @@ test_inset_and_mode_cycles()
 test_unobserved_duplicate_fails_safely()
 test_deleted_original_with_surviving_copy()
 test_native_edit_transforms()
+test_deleted_then_recreated_same_id()
 test_inset_undo()
 test_final_vertex_survives_tessellation_flip()
 print('VERTEX TRACKING PASS', bpy.app.version_string, flush=True)
