@@ -110,12 +110,24 @@ class Probe:
 
     def __init__(self):
         self.mouse = None
-        self.geometry = None
-        self.geometry_key = None
+        self.maximum_snap = False
+        self.reset()
+
+    def clear_lock(self):
+        self.locked_value = None
+        self.locked_key = None
+
+    def set_maximum_snap(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self.maximum_snap:
+            return False
+        self.maximum_snap = enabled
         self.query_key = None
-        self.geometry_error = None
+        self.clear_lock()
+        return True
 
     def reset(self):
+        self.clear_lock()
         self.geometry = None
         self.geometry_key = None
         self.query_key = None
@@ -131,6 +143,7 @@ class Probe:
         if (temporarily_suppressed(window) or ruler.is_running(window)
                 or not wm.final_dimensions_hover or target is None or obj is None
                 or obj.type != 'MESH' or not obj.visible_get(view_layer=window.view_layer)):
+            self.clear_lock()
             self.query_key = None
             if _results.pop(pointer, None) is not None:
                 _redraw(window)
@@ -139,10 +152,12 @@ class Probe:
         space = area.spaces.active
         # Quad view requires matching region-specific RegionView3D.
         if space.region_quadviews:
+            self.clear_lock()
             _results.pop(pointer, None)
             self.query_key = None
             return
         if not space.overlay.show_overlays:
+            self.clear_lock()
             _results.pop(pointer, None)
             self.query_key = None
             return
@@ -153,9 +168,15 @@ class Probe:
                         window.scene.as_pointer(), window.view_layer.as_pointer(),
                         tuple(v for row in obj.matrix_world for v in row))
         coordinate = (self.mouse[0] - region.x, self.mouse[1] - region.y)
+        lock_key = (geometry_key, area.as_pointer(),
+                    edge['signature'] if edge else None, mode)
+        if self.maximum_snap and self.locked_value is not None and self.locked_key == lock_key:
+            _results[pointer] = self.locked_value
+            return
+        self.clear_lock()
         query_key = (geometry_key, area.as_pointer(), coordinate, region.width,
                      region.height, tuple(v for row in rv3d.perspective_matrix for v in row),
-                     edge['signature'] if edge else None, mode)
+                     edge['signature'] if edge else None, mode, self.maximum_snap)
         if query_key == self.query_key:
             return
         self.query_key = query_key
@@ -199,14 +220,21 @@ class Probe:
             result = self.geometry.section(hit['point'], normal, hit['triangle'])
             if result is None or not result['segments'] or result['diameter'] <= 0:
                 raise ValueError("No measurable section at this point")
-            result = cursor_diameter(result, hit['point'], normal)
+            if self.maximum_snap:
+                if not result.get('closed'):
+                    raise ValueError('Maximum diameter needs a closed, manifold section')
+            else:
+                result = cursor_diameter(result, hit['point'], normal)
             value['section'] = result
+            value['maximum_snap'] = self.maximum_snap
             value['hit'] = tuple(hit['point'])
             value['warnings'] = tuple(dict.fromkeys(
                 (*self.geometry.warnings, *result.get('warnings', ()))))
         except (ValueError, RuntimeError, ReferenceError) as exc:
             value['message'] = str(exc)
         _results[pointer] = value
+        if self.maximum_snap and value['section'] is not None:
+            self.locked_key, self.locked_value = lock_key, value
         _redraw(window)
 
 
@@ -237,15 +265,23 @@ class VIEW3D_OT_final_dimensions_hover(bpy.types.Operator):
             return {'CANCELLED'}
         if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
             self._probe.mouse = (event.mouse_x, event.mouse_y)
-        elif event.type == 'WINDOW_DEACTIVATE':
+        snap_changed = False
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE', 'LEFT_CTRL', 'RIGHT_CTRL'}:
+            snap_changed = self._probe.set_maximum_snap(event.ctrl)
+        if event.type == 'WINDOW_DEACTIVATE':
             self._probe.mouse = None
+            self._probe.set_maximum_snap(False)
+            self._probe.clear_lock()
+            _results.pop(self._window_pointer, None)
+            _redraw(context.window)
         # Blender Event exposes the event type, not the originating Timer.
         # A monotonic throttle also handles TIMER events from other add-ons.
-        if event.type == 'TIMER':
+        if event.type == 'TIMER' or snap_changed:
             now = time.monotonic()
-            if now - self._last_tick >= _INTERVAL * 0.9:
+            if snap_changed or now - self._last_tick >= _INTERVAL * 0.9:
                 self._last_tick = now
                 parent = _parent()
+                previous = parent._measuring
                 parent._measuring = True
                 try:
                     self._probe.update(context, parent._epoch)
@@ -253,7 +289,7 @@ class VIEW3D_OT_final_dimensions_hover(bpy.types.Operator):
                     self._probe.reset()
                     _results.pop(self._window_pointer, None)
                 finally:
-                    parent._measuring = False
+                    parent._measuring = previous
         return {'PASS_THROUGH'}
 
     def cancel(self, context):
@@ -293,6 +329,7 @@ def clear_window(window):
     operator = _operators.get(pointer)
     if operator is not None:
         operator._probe.query_key = None
+        operator._probe.clear_lock()
 
 
 def prune(live_windows):
@@ -392,8 +429,15 @@ def _draw_pixel():
     import blf
     blf.size(0, overlay._SIZE)
     width, height = blf.dimensions(0, label)
-    x = min(max(8, value['mouse'][0] + 18), max(8, context.region.width - width - 8))
-    y = min(max(8, value['mouse'][1] + 18), max(8, context.region.height - height - 8))
+    position = value['mouse']
+    if value.get('maximum_snap'):
+        a, b = map(Vector, section['endpoints'])
+        projected = view3d_utils.location_3d_to_region_2d(
+            context.region, context.region_data, (a+b)*.5)
+        if projected is not None:
+            position = projected
+    x = min(max(8, position[0] + 18), max(8, context.region.width - width - 8))
+    y = min(max(8, position[1] + 18), max(8, context.region.height - height - 8))
     overlay._text(x, y, label, (0.25, 0.88, 1.0, 1.0))
 
 
@@ -408,8 +452,8 @@ def _settings_changed(_wm, _context):
 def register():
     global _registered
     bpy.types.WindowManager.final_dimensions_hover = BoolProperty(
-        name='Hover section', default=True, update=_settings_changed,
-        description='Measure a section diameter through the mouse hit and section center')
+        name='Hover section', default=False, update=_settings_changed,
+        description='Measure the section under the mouse; hold Ctrl to lock its maximum diameter')
     bpy.types.WindowManager.final_dimensions_section_axis = EnumProperty(
         name='Section orientation', default='EDGE', update=_settings_changed,
         items=[('EDGE', 'Edge + surface', 'Plane through the hit, spanning selected transverse edge and surface normal'),

@@ -13,6 +13,7 @@ from final_dimensions import overlay
 
 bpy.context.preferences.view.show_splash = False
 addon.register()
+bpy.context.window_manager.final_dimensions_show_overlay = True
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
 bpy.ops.mesh.primitive_cube_add(size=.04)

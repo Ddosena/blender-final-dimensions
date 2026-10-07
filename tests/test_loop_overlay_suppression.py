@@ -13,6 +13,8 @@ addon.register()
 window = SimpleNamespace(as_pointer=lambda: 101, modal_operators=[])
 other = SimpleNamespace(as_pointer=lambda: 102, modal_operators=[])
 wm = bpy.context.window_manager
+assert not wm.final_dimensions_hover and not wm.final_dimensions_show_overlay
+wm.final_dimensions_hover = True
 try:
     for identifier in ('MESH_OT_loopcut_slide', 'mesh.loopcut',
                        'TRANSFORM_OT_edge_slide', 'transform.vert_slide'):

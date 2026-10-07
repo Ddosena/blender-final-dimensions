@@ -65,6 +65,8 @@ test_temp = ROOT / 'artifacts' / 'runtime-temp'
 test_temp.mkdir(exist_ok=True)
 bpy.context.preferences.filepaths.temporary_directory = str(test_temp)
 addon.register()
+bpy.context.window_manager.final_dimensions_hover = True
+bpy.context.window_manager.final_dimensions_show_overlay = True
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
 bpy.ops.mesh.primitive_cylinder_add(vertices=64, radius=.02, depth=.12)

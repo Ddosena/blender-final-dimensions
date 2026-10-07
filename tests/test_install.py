@@ -30,6 +30,8 @@ dimensions = module.measure_object(bpy.context, bpy.context.object)
 assert dimensions['final'] == (2.0, 2.0, 2.0), dimensions
 assert bpy.app.timers.is_registered(module._timer_tick)
 assert module.ruler._registered and len(module.ruler._handles) == 1
+assert not bpy.context.window_manager.final_dimensions_hover
+assert not bpy.context.window_manager.final_dimensions_show_overlay
 assert hasattr(bpy.types.Scene, 'final_dimensions_ruler_appearance')
 bpy.ops.view3d.final_dimensions_ruler_style.get_rna_type()
 bpy.ops.mesh.final_dimensions_loop_offset.get_rna_type()

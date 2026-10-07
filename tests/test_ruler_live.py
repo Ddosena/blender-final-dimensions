@@ -38,6 +38,7 @@ temporary = ROOT / 'artifacts' / 'runtime-temp' / ('ruler-'+bpy.app.version_stri
 temporary.mkdir(parents=True, exist_ok=True)
 bpy.context.preferences.filepaths.temporary_directory = str(temporary)
 addon.register()
+bpy.context.window_manager.final_dimensions_hover = True
 bpy.ops.object.select_all(action='SELECT')
 bpy.ops.object.delete(use_global=False)
 bpy.ops.mesh.primitive_cube_add(size=.04, location=(-.05,0,0))

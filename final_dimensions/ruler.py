@@ -711,8 +711,10 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             if manager.mode == 'DRAG' or self._pending_pie:
                 return self._cancel_interaction(context)
         if event.type == 'MIDDLEMOUSE':
-            if (event.value != 'PRESS' or manager.mode != 'IDLE'
-                    or event.shift or event.ctrl or event.alt or event.oskey
+            return {'PASS_THROUGH'}
+        if event.type == 'LEFTMOUSE' and event.alt and manager.mode == 'IDLE':
+            if (event.value != 'PRESS'
+                    or event.shift or event.ctrl or event.oskey
                     or self._native_pie_open or _native_point_operator_running(context.window)):
                 return {'PASS_THROUGH'}
             index = self._near_ruler(context)
@@ -1328,7 +1330,7 @@ def draw_panel(layout, context):
                      text='Point to 3D Cursor', icon='CURSOR')
     else:
         box.label(text='Drag point · Right click to replace')
-        box.label(text='Middle click line to remove')
+        box.label(text='Alt + left click line to remove')
     for hit in (state.first, state.second):
         if hit:
             box.label(text=hit['object_name'])

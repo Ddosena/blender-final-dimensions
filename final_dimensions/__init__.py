@@ -15,7 +15,7 @@ from . import overlay, hover, ruler, ruler_style, loop_offset
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 9, 0),
+    "version": (0, 9, 1),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
     "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
@@ -266,6 +266,7 @@ class VIEW3D_PT_final_dimensions(bpy.types.Panel):
         if context.window_manager.final_dimensions_hover:
             box.prop(context.window_manager, "final_dimensions_section_axis", text="Plane")
             box.label(text="f = cursor diameter · ½ = half")
+            box.label(text="Hold Ctrl: lock maximum diameter")
             if context.window_manager.final_dimensions_section_axis == 'EDGE':
                 box.label(text="Select a transverse edge")
                 box.label(text="Plane follows surface normal")
@@ -368,7 +369,7 @@ def register():
     bpy.types.WindowManager.final_dimensions_show_overlay = BoolProperty(
         name="Selected edge labels",
         description="Show selected edge and evaluated directional span in the viewport",
-        default=True,
+        default=False,
     )
     bpy.utils.register_class(VIEW3D_PT_final_dimensions)
     bpy.utils.register_class(VIEW3D_PT_final_dimensions_object)
