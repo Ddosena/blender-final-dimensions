@@ -177,6 +177,11 @@ def tick():
             assert abs(measured.distance-math.dist(POINTS[1], POINTS[2])) < 1e-7, measured.distance
             assert len(ruler.collection(window).items) == 2
             passed('control_point_to_control_point_distance')
+            # The last placed point is active; only its ring marks it, no caption
+            # covers the distance label.
+            assert ruler.collection(window).active_endpoint is not None
+            assert not any(label.startswith('Active point') for label in state['labels'])
+            passed('active_point_has_no_viewport_caption')
             with bpy.context.temp_override(window=window, area=area, region=region):
                 bpy.ops.wm.call_panel(name='VIEW3D_PT_final_dimensions', keep_open=True)
         elif step == 9:

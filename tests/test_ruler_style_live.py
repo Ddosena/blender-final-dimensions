@@ -125,6 +125,16 @@ def tick():
             assert item.precision == 2
             assert tuple(round(x, 2) for x in item.color) == (.2, .4, .8, 1.0)
             state['cases'].append('dialog_cancel_preserves_item')
+            # The sidebar Name field edits the selected ruler directly.
+            with bpy.context.temp_override(window=window, area=area, region=region):
+                wm = bpy.context.window_manager
+                wm.final_dimensions_ruler_name = '  Горлышко '
+                assert wm.final_dimensions_ruler_name == 'Горлышко'
+                assert item.label == 'Горлышко'
+                assert ruler_style.label_text(scene, item, 0, item.distance) == 'Горлышко: 2.35 mm'
+                wm.final_dimensions_ruler_name = ''
+                assert ruler_style.label_text(scene, item, 0, item.distance) == '1 d: 2.35 mm'
+            state['cases'].append('sidebar_name_field_renames_selected_ruler')
             finish()
             return None
         state['step'] += 1

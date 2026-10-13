@@ -1245,12 +1245,9 @@ def _draw_pixel():
                 _marker(a, color)
                 _marker(b, color)
                 if manager.active_endpoint is not None:
-                    active_point = (a, b)[manager.active_endpoint]
-                    _marker(active_point, (1., 1., 1., 1.), 9.)
-                    if active_point is not None:
-                        overlay._text(active_point.x+12, active_point.y+10,
-                                      f'Active point {manager.active_endpoint+1}',
-                                      (1., 1., 1., 1.))
+                    # The white ring marks the active point; a caption here
+                    # would cover the distance label of short rulers.
+                    _marker((a, b)[manager.active_endpoint], (1., 1., 1., 1.), 9.)
         item = manager.selected
         if (manager.mode != 'IDLE' and item
                 and context.area.as_pointer() == item.area_pointer):

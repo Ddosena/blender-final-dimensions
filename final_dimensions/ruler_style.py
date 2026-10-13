@@ -78,6 +78,24 @@ def label_text(scene, item, index, distance):
     return f'{name}: {value}' if name else f'{index + 1} d: {value}'
 
 
+def _selected_item():
+    from . import ruler
+    return ruler.get(bpy.context.window)
+
+
+def _get_selected_label(_self):
+    item = _selected_item()
+    return getattr(item, 'label', '') if item is not None else ''
+
+
+def _set_selected_label(_self, value):
+    """Sidebar text field: rename the selected ruler without a popup."""
+    item = _selected_item()
+    if item is not None:
+        item.label = value.strip()
+        _redraw_views()
+
+
 class VIEW3D_OT_final_dimensions_ruler_style(bpy.types.Operator):
     """Edit the selected ruler's presentation without touching its anchors."""
 
@@ -164,8 +182,13 @@ def draw_defaults(layout, context):
 def draw_selected(layout, context):
     from . import ruler
     manager = ruler.collection(context.window)
+    enabled = manager is not None and manager.selected is not None
     row = layout.row()
-    row.enabled = manager is not None and manager.selected is not None
+    row.enabled = enabled
+    row.prop(context.window_manager, 'final_dimensions_ruler_name', text='',
+             placeholder='Ruler name', icon='SORTALPHA')
+    row = layout.row()
+    row.enabled = enabled
     row.operator(VIEW3D_OT_final_dimensions_ruler_style.bl_idname,
                  text='Label & Color…', icon='GREASEPENCIL')
 
@@ -178,9 +201,13 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Scene.final_dimensions_ruler_appearance = PointerProperty(
         type=FinalDimensionsRulerAppearance)
+    bpy.types.WindowManager.final_dimensions_ruler_name = StringProperty(
+        name='Name', description='Name shown before the selected ruler distance',
+        get=_get_selected_label, set=_set_selected_label)
 
 
 def unregister():
+    del bpy.types.WindowManager.final_dimensions_ruler_name
     del bpy.types.Scene.final_dimensions_ruler_appearance
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
