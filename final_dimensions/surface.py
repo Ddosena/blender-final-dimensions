@@ -98,6 +98,13 @@ def _topology(geometry):
     return geometry._surface_topology
 
 
+def _fill_bounds(record, geometry):
+    """Replace unknown bounds with the AABB of the built world-space geometry."""
+    if record["bounds"] is None and geometry is not None and len(geometry.vertices):
+        record["bounds"] = (tuple(geometry.vertices.min(axis=0)),
+                            tuple(geometry.vertices.max(axis=0)))
+
+
 def _components_warning(evaluated, curve_owner=False):
     components = _nonmesh_components(evaluated)
     if components is None:
@@ -164,9 +171,14 @@ class ScenePicker:
             warnings_by_owner[pointer] = object_warnings
             key = ("OBJECT", pointer)
             keys.add(key)
+            # A curve object's bound_box ignores geometry its modifiers add,
+            # such as Geometry Nodes copies. Its bounds stay unknown until the
+            # evaluated mesh is built (see _fill_bounds).
             records.append({"key": key, "owner": pointer,
                             "owner_uid": int(obj.session_uid), "source": pointer,
-                            "name": obj.name, "bounds": _bounds(evaluated, evaluated.matrix_world)})
+                            "name": obj.name,
+                            "bounds": (_bounds(evaluated, evaluated.matrix_world)
+                                       if obj.type == "MESH" else None)})
             if len(records) > MAX_RECORDS:
                 raise ValueError("Too many visible mesh objects for surface picking")
         for instance in depsgraph.object_instances:
@@ -261,6 +273,7 @@ class ScenePicker:
             self._retain(key, None)
             return None
         geometry = Geometry(*(np.concatenate(part, axis=0) for part in chunks))
+        _fill_bounds(record, geometry)
         self._retain(key, geometry)
         return geometry
 

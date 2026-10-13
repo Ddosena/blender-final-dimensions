@@ -288,9 +288,37 @@ def geometry_nodes_on_curve():
     assert wire and any('instances' in warning for warning in wire['warnings']), wire['warnings']
 
 
+def geometry_beyond_curve_bounds():
+    """Geometry Nodes copies outside the curve's own bound_box stay pickable."""
+    clear()
+    obj = poly_curve('arrayed curve', [(-2, 0, 0), (-1, 0, 0)])
+    group = bpy.data.node_groups.new('copy right', 'GeometryNodeTree')
+    group.interface.new_socket(name='Geometry', in_out='INPUT', socket_type='NodeSocketGeometry')
+    group.interface.new_socket(name='Geometry', in_out='OUTPUT', socket_type='NodeSocketGeometry')
+    nodes, links = group.nodes, group.links
+    source, output = nodes.new('NodeGroupInput'), nodes.new('NodeGroupOutput')
+    shift = nodes.new('GeometryNodeTransform')
+    shift.inputs['Translation'].default_value = (4, 0, 0)
+    join = nodes.new('GeometryNodeJoinGeometry')
+    links.new(source.outputs[0], shift.inputs[0])
+    links.new(source.outputs[0], join.inputs[0])
+    links.new(shift.outputs[0], join.inputs[0])
+    links.new(join.outputs[0], output.inputs[0])
+    obj.modifiers.new('GN', 'NODES').node_group = group
+    p = picker()
+    close(free(p, (2.5, .02, 0))['point'], (2.5, 0, 0))
+    close(hit(p, (3, 0, 0), {'VERTEX'}, 'FINAL')['point'], (3, 0, 0))
+    close(free(p, (-1.5, .02, 0))['point'], (-1.5, 0, 0))
+    obj.data.bevel_depth = .2
+    p = picker()
+    top = p.pick(bpy.context, (2.5, 0, 10), (0, 0, -1))
+    assert top and top['object_name'] == obj.name, top
+
+
 for check in (wire_curve_free_pick_follows_edits, control_points_and_final_line,
               bezier_line_and_knots, edit_mode_control_points, beveled_curve_is_a_surface,
-              wire_mesh_and_occlusion, text_and_nurbs_surface, geometry_nodes_on_curve):
+              wire_mesh_and_occlusion, text_and_nurbs_surface, geometry_nodes_on_curve,
+              geometry_beyond_curve_bounds):
     check()
     print('CURVE CHECK', check.__name__, flush=True)
 clear()

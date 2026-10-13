@@ -10,7 +10,7 @@ import hashlib
 import numpy as np
 
 from .section import Geometry, MAX_VERTICES, MAX_TRIANGLES
-from .surface import ScenePicker, _barycentric, _ray_box
+from .surface import ScenePicker, _barycentric, _fill_bounds, _ray_box
 from .vertex_tracking import TRACKER
 
 SUPPORTED_ELEMENTS = frozenset({'VERTEX', 'EDGE', 'FACE', 'FACE_PROJECT', 'EDGE_MIDPOINT'})
@@ -307,6 +307,7 @@ class SnapPicker(ScenePicker):
             finally:
                 if mesh is not None:
                     evaluated.to_mesh_clear()
+            _fill_bounds(record, geometry)
         self._retain(key, geometry)
         return geometry
 
