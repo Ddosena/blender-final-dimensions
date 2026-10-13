@@ -9,16 +9,17 @@ from bpy.app.handlers import persistent
 from bpy.props import BoolProperty
 
 from .measure import format_length, measure_object
+from .surface import PICK_TYPES
 from . import overlay, hover, ruler, ruler_style, loop_offset
 
 
 bl_info = {
     "name": "Final Dimensions",
     "author": "Final Dimensions contributors",
-    "version": (0, 9, 1),
+    "version": (0, 10, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Sidebar > Final Dimensions",
-    "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces",
+    "description": "Measure evaluated mesh dimensions and snap a ruler to final surfaces and curves",
     "category": "3D View",
 }
 
@@ -280,7 +281,9 @@ class VIEW3D_PT_final_dimensions(bpy.types.Panel):
                     box.label(text=line, icon='INFO')
         obj = context.view_layer.objects.active
         if obj is None or obj.type != "MESH":
-            layout.label(text="Select a mesh object", icon="INFO")
+            # Rulers measure curves too; only the mesh tools below need a mesh.
+            if obj is None or obj.type not in PICK_TYPES:
+                layout.label(text="Select a mesh object", icon="INFO")
             return
 
         if obj.mode == "EDIT" and context.window_manager.final_dimensions_show_overlay:

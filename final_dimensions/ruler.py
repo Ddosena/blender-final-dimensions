@@ -392,8 +392,9 @@ class RulerCollection:
                     self.candidate = None
                     message = 'Choose Vertex, Edge or Face snapping'
             else:
-                self.candidate = self.picker.pick(context, origin, direction)
-                message = 'Move onto a visible mesh surface'
+                self.candidate = self.picker.pick(context, origin, direction,
+                                                  (region, rv3d, coordinate))
+                message = 'Move onto a visible surface or curve'
             item.message = item.error_message() if self.candidate else message
         except (ValueError, RuntimeError, ReferenceError) as exc:
             self.candidate = None
@@ -533,7 +534,7 @@ def _changed(context):
 class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
     bl_idname = 'view3d.final_dimensions_ruler'
     bl_label = 'Add Surface Ruler'
-    bl_description = 'Add a ruler by clicking two evaluated mesh surfaces'
+    bl_description = 'Add a ruler by clicking two evaluated surfaces or curves'
     bl_options = {'INTERNAL'}
 
     listen_only: BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})
@@ -1287,7 +1288,7 @@ def draw_panel(layout, context):
               icon='SNAP_ON' if settings.use_snap else 'SNAP_OFF')
     manager = collection(context.window)
     if manager is None or not manager.items:
-        box.label(text='Two clicks on final surfaces')
+        box.label(text='Two clicks on surfaces or curves')
         return
     # Ordinary panel rows use the sidebar's native scrolling, with no RNA collection.
     for index, item in enumerate(manager.items):
@@ -1361,9 +1362,9 @@ def register():
     bpy.types.WindowManager.final_dimensions_snap_source = EnumProperty(
         name='Snap mesh',
         description='Geometry used for ruler snapping when the Blender magnet is enabled',
-        items=(('ORIGINAL', 'Original', 'Base mesh before modifiers'),
-               ('FINAL', 'Final', 'Viewport mesh after modifiers'),
-               ('BOTH', 'Both', 'Base mesh and viewport result')),
+        items=(('ORIGINAL', 'Original', 'Base mesh or curve control points before modifiers'),
+               ('FINAL', 'Final', 'Viewport mesh or curve line after modifiers'),
+               ('BOTH', 'Both', 'Base geometry and viewport result')),
         default='BOTH',
     )
     for cls in _CLASSES:

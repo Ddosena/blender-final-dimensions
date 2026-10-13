@@ -135,6 +135,57 @@ def _snapshot(mesh, matrix, edit=False):
                      tuple(np.asarray(v, dtype=np.bool_) for v in selected))
 
 
+def _curve_snapshot(curve, matrix):
+    """Spline control points as loose vertices; Bezier handles are left out.
+
+    In Edit Mode ``curve.splines`` already reads the live edit data.
+    """
+    points, hidden, selected = [], [], []
+    layout = hashlib.blake2b(digest_size=16)
+    for spline in curve.splines:
+        if spline.type == 'BEZIER':
+            items = spline.bezier_points
+            points.extend(tuple(point.co) for point in items)
+            selected.extend(point.select_control_point for point in items)
+        else:
+            items = spline.points
+            # NURBS and Poly points are homogeneous (x, y, z, w).
+            points.extend(tuple(point.co)[:3] for point in items)
+            selected.extend(point.select for point in items)
+        hidden.extend(point.hide for point in items)
+        if len(points) > MAX_VERTICES:
+            raise ValueError('Curve exceeds the snap vertex limit')
+        layout.update(f'{spline.type}:{len(items)};'.encode())
+    matrix = np.asarray(matrix, dtype=np.float64)
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError('Object transform contains non-finite values')
+    xyz = np.asarray(points, dtype=np.float64).reshape(-1, 3) @ matrix[:3, :3].T + matrix[:3, 3]
+    if not np.all(np.isfinite(xyz)):
+        raise ValueError('Curve contains non-finite coordinates')
+    none = np.empty(0, dtype=np.bool_)
+    return _Features(xyz, np.zeros_like(xyz), np.empty((0, 3), dtype=np.int32), none,
+                     np.empty((0, 2), dtype=np.int32), layout.digest(),
+                     (np.asarray(hidden, dtype=np.bool_), none, none),
+                     (np.asarray(selected, dtype=np.bool_), none, none))
+
+
+def _loose_edges(geometry):
+    """Edges used by no face: the visible line of a curve without bevel."""
+    cached = getattr(geometry, '_loose_edges', None)
+    if cached is not None:
+        return cached
+    loose = np.ones(len(geometry.edges), dtype=np.bool_)
+    tri = geometry.triangles
+    if len(tri) and len(loose):
+        n = max(len(geometry.vertices), 1)
+        keys = np.min(geometry.edges, axis=1).astype(np.int64)*n + np.max(geometry.edges, axis=1)
+        sides = np.stack((tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]), axis=1).reshape(-1, 2)
+        side_keys = np.min(sides, axis=1).astype(np.int64)*n + np.max(sides, axis=1)
+        loose = ~np.isin(keys, side_keys)
+    geometry._loose_edges = loose
+    return loose
+
+
 def _projection(vertices, matrix, region):
     homogeneous = np.column_stack((vertices, np.ones(len(vertices)))) @ matrix.T
     w = homogeneous[:, 3]
@@ -239,8 +290,11 @@ class SnapPicker(ScenePicker):
         if source == 'ORIGINAL':
             import bmesh
             owner = self._owner(context, record)
-            mesh = bmesh.from_edit_mesh(owner.data) if owner.mode == 'EDIT' else owner.data
-            geometry = _snapshot(mesh, owner.matrix_world, owner.mode == 'EDIT')
+            if owner.type != 'MESH':
+                geometry = _curve_snapshot(owner.data, owner.matrix_world)
+            else:
+                mesh = bmesh.from_edit_mesh(owner.data) if owner.mode == 'EDIT' else owner.data
+                geometry = _snapshot(mesh, owner.matrix_world, owner.mode == 'EDIT')
             if len(geometry.vertices):
                 self._original_bounds[record['key']] = (tuple(geometry.vertices.min(axis=0)),
                                                        tuple(geometry.vertices.max(axis=0)))
@@ -315,7 +369,25 @@ class SnapPicker(ScenePicker):
                 'object_name': record['name'], 'anchor': anchor, 'warnings': record['warnings'],
                 'snap_kind': kind, 'snap_source': source}
 
-    def snap(self, context, origin, direction, region, rv3d, coordinate, elements, source='BOTH'):
+    def pick(self, context, origin, direction, view=None):
+        """Free point: a visible wire near the cursor, otherwise the front surface.
+
+        ``view`` is ``(region, rv3d, coordinate)``. A curve without bevel has no
+        faces for the ray, so its line is found within the snap radius instead.
+        """
+        surface_hit = super().pick(context, origin, direction)
+        if view is None:
+            return surface_hit
+        warnings = self.warnings
+        wire = self.snap(context, origin, direction, *view, {'EDGE'}, 'FINAL', wire_only=True)
+        if wire is None:
+            self.warnings = warnings
+            return surface_hit
+        wire['snap_kind'] = 'WIRE'
+        return wire
+
+    def snap(self, context, origin, direction, region, rv3d, coordinate, elements, source='BOTH',
+             wire_only=False):
         if source not in {'ORIGINAL', 'FINAL', 'BOTH'}:
             raise ValueError('Unknown snap geometry source')
         origin, direction = np.asarray(origin, dtype=np.float64), np.asarray(direction, dtype=np.float64)
@@ -345,6 +417,8 @@ class SnapPicker(ScenePicker):
                 geometry = self._feature_geometry(context, record, layer)
                 if geometry is None or not len(geometry.vertices):
                     continue
+                if wire_only and not _loose_edges(geometry).any():
+                    continue
                 homogeneous, pixels, valid = _projection(geometry.vertices, projection, region)
                 front_v, front_e, front_f = _front_flags(geometry, camera, bool(getattr(rv3d, 'is_perspective', True)), direction) if culling else (None, None, None)
                 owner = self._owner(context, record)
@@ -354,6 +428,8 @@ class SnapPicker(ScenePicker):
                         continue
                     group = 0 if kind == 'VERTEX' else 1
                     allowed = ~geometry.hidden[group]
+                    if wire_only:
+                        allowed &= _loose_edges(geometry)
                     if exclude_selected:
                         allowed &= ~geometry.selected[group]
                     if culling:
@@ -414,7 +490,8 @@ class SnapPicker(ScenePicker):
                         norm = np.linalg.norm(normal)
                         normal = normal/norm if norm > 1e-15 else -direction
                         vertex_identity = None
-                        if layer == 'ORIGINAL' and kind == 'VERTEX':
+                        # Curve control points have no mesh identity layer.
+                        if layer == 'ORIGINAL' and kind == 'VERTEX' and owner.type == 'MESH':
                             try:
                                 vertex_identity = self._vertex_tracker.bind(owner, index)
                             except ValueError:

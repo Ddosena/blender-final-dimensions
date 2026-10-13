@@ -195,7 +195,8 @@ def tick():
         elif step == 12:
             assert not ruler.is_running(window)
             assert len(ruler.collection(window).items) == 1
-            assert ruler.get(window).first is None and ruler.get(window).second
+            # Since 0.9.0 the lost first anchor is frozen in place, not removed.
+            assert ruler.get(window).first['anchor']['kind'] == 'WORLD' and ruler.get(window).second
             assert hover.get(window) and hover.get(window)['section']
             passed('escape_cancels_only_unfinished_addition')
             passed('hover_resumes_after_ruler')

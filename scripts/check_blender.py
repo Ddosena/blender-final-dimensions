@@ -60,7 +60,7 @@ def main():
         report['checks'].append(name)
 
     for script in ('test_blender', 'test_extra', 'test_direction', 'test_section',
-                   'test_cursor_diameter', 'test_surface', 'test_snapping',
+                   'test_cursor_diameter', 'test_surface', 'test_snapping', 'test_curves',
                    'test_vertex_tracking', 'test_vertex_tracking_native_ops',
                    'test_vertex_ruler_deferred',
                    'test_loop_offset', 'test_ruler_style',
@@ -84,6 +84,7 @@ def main():
         for script, prefix in (('test_hover_live', 'hover-live'), ('test_ruler_live', 'ruler-live'),
                                ('test_multi_ruler_live', 'multi-ruler-live'),
                                ('test_snap_ruler_live', 'snap-ruler-live'),
+                               ('test_curve_ruler_live', 'curve-ruler-live'),
                                ('test_cursor_ruler_live', 'cursor-ruler-live'),
                                ('test_active_ruler_live', 'active-ruler-live'),
                                ('test_vertex_ruler_live', 'vertex-ruler-live'),

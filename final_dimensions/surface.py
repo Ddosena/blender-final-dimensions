@@ -1,4 +1,4 @@
-"""Lazy evaluated-surface picking across visible mesh objects in a view layer.
+"""Lazy evaluated-surface picking across visible mesh and curve objects in a view layer.
 
 ``refresh`` invalidates cached BVHs on a depsgraph epoch change. Records and
 anchors contain only Python primitives; evaluated Blender RNA is resolved for
@@ -20,6 +20,9 @@ MAX_RECORDS = 100_000
 MAX_CACHED_RECORDS = 32
 MAX_CACHED_VERTICES = 700_000
 MAX_CACHED_TRIANGLES = 1_400_000
+# Object types whose evaluated result converts with Object.to_mesh(). A curve
+# without bevel or extrusion becomes loose wire edges.
+PICK_TYPES = frozenset({"MESH", "CURVE", "SURFACE", "FONT"})
 
 
 def _visible(obj, context):
@@ -95,10 +98,21 @@ def _topology(geometry):
     return geometry._surface_topology
 
 
-def _components_warning(evaluated):
+def _components_warning(evaluated, curve_owner=False):
     components = _nonmesh_components(evaluated)
     if components is None:
         return "Geometry Nodes non-mesh components could not be inspected."
+    if curve_owner:
+        # to_mesh() of a curve-type object draws its curves as wire when there
+        # is no mesh, and never realizes instances.
+        try:
+            geometry = evaluated.evaluated_geometry()
+            if geometry.mesh is None:
+                components.discard("curves")
+            if geometry.instances_pointcloud() is not None:
+                components.add("instances")
+        except (AttributeError, RuntimeError, ReferenceError):
+            return "Geometry Nodes non-mesh components could not be inspected."
     if components:
         return "Geometry Nodes non-mesh components omitted: " + ", ".join(sorted(components)) + "."
     return None
@@ -132,7 +146,7 @@ class ScenePicker:
         component_cache = {}
         gn_owners = set()
         for obj in context.view_layer.objects:
-            if obj.type != "MESH" or not _visible(obj, context):
+            if obj.type not in PICK_TYPES or not _visible(obj, context):
                 continue
             pointer = obj.as_pointer()
             visible[pointer] = obj
@@ -144,7 +158,7 @@ class ScenePicker:
                 object_warnings.append("Some enabled modifiers are hidden in Edit Mode evaluation.")
             if any(modifier.type == "NODES" and modifier.show_viewport for modifier in obj.modifiers):
                 gn_owners.add(pointer)
-                warning = _components_warning(evaluated)
+                warning = _components_warning(evaluated, obj.type != "MESH")
                 if warning:
                     object_warnings.append(warning)
             warnings_by_owner[pointer] = object_warnings
@@ -161,6 +175,11 @@ class ScenePicker:
             parent = _original(instance.parent)
             owner = parent.as_pointer()
             if owner not in visible:
+                continue
+            if parent.type != "MESH":
+                # A curve, surface or text object exposes its own evaluated mesh
+                # as a temporary instance. The owner's to_mesh() already reads it;
+                # converting that temporary object can crash Blender.
                 continue
             source = instance.object
             if source is None or source.type != "MESH":
@@ -220,7 +239,7 @@ class ScenePicker:
             owner = next((obj for obj in context.view_layer.objects
                           if obj.as_pointer() == record["owner"]
                           and int(obj.session_uid) == record["owner_uid"]), None)
-        if owner is None or owner.type != "MESH" or not _visible(owner, context):
+        if owner is None or owner.type not in PICK_TYPES or not _visible(owner, context):
             raise ValueError("Anchor object was deleted or hidden")
         record["name"] = owner.name
         return owner
