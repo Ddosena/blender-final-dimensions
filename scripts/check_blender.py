@@ -87,6 +87,7 @@ def main():
                                ('test_curve_ruler_live', 'curve-ruler-live'),
                                ('test_cursor_ruler_live', 'cursor-ruler-live'),
                                ('test_active_ruler_live', 'active-ruler-live'),
+                               ('test_ruler_pair_live', 'ruler-pair-live'),
                                ('test_vertex_ruler_live', 'vertex-ruler-live'),
                                ('test_smooth_ruler_live', 'smooth-ruler-live'),
                                ('test_ruler_style_live', 'ruler-style-live'),

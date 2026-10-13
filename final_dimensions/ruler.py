@@ -568,6 +568,7 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         self._native_pie_open = False
         self._drag_start_mouse = None
         self._drag_started = False
+        self._swallow_release = False
         self._state = manager
         self._timer = context.window_manager.event_timer_add(_INTERVAL, window=context.window)
         _sessions[pointer] = self
@@ -663,19 +664,51 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
         return _nearest_screen_ruler(coordinate, segments, self._state.active)
 
     def _active_screen_distance(self, context):
+        """Distance to the selected points or their midpoint, where gizmos sit."""
         manager = self._state
         target = hover._viewport_at(context.window, self._mouse)
         if target is None or manager.selected is None or manager.active_endpoint is None:
             return float('inf')
         area, region = target
-        hit = getattr(manager.selected, _SLOTS[manager.active_endpoint])
-        if hit is None or area.as_pointer() != manager.selected.area_pointer:
+        slots = point_edit.selected_slots(manager) or (manager.active_endpoint,)
+        hits = [getattr(manager.selected, _SLOTS[slot]) for slot in slots]
+        if any(hit is None for hit in hits) or area.as_pointer() != manager.selected.area_pointer:
             return float('inf')
-        projected = view3d_utils.location_3d_to_region_2d(
-            region, area.spaces.active.region_3d, Vector(hit['point']))
-        if projected is None:
-            return float('inf')
-        return (projected-Vector((self._mouse[0]-region.x, self._mouse[1]-region.y))).length
+        points = [Vector(hit['point']) for hit in hits]
+        points.append(sum(points, Vector())/len(points))
+        mouse = Vector((self._mouse[0]-region.x, self._mouse[1]-region.y))
+        distances = [(projected-mouse).length for projected in (
+            view3d_utils.location_3d_to_region_2d(region, area.spaces.active.region_3d, point)
+            for point in points) if projected is not None]
+        return min(distances, default=float('inf'))
+
+    def _shift_select(self, context, match):
+        """Shift+click an endpoint of the selected ruler: extend, make active or deselect.
+
+        With both points selected, native tools treat the ruler like an edge.
+        """
+        manager = self._state
+        index, slot = match
+        selected = point_edit.selected_slots(manager) or (
+            (manager.active_endpoint,) if manager.active_endpoint is not None else ())
+        if index != manager.active or not selected or manager.mode != 'IDLE':
+            return False
+        if slot not in selected:
+            slots = (0, 1)
+        elif slot != manager.active_endpoint:
+            slots = selected
+        else:
+            slots = tuple(part for part in selected if part != slot)
+            if not slots:
+                point_edit.stop()
+                manager.active_endpoint = None
+                _redraw(context.window)
+                return True
+            slot = slots[0]
+        if not point_edit.activate(context, manager, index, slot, _world_hit, slots):
+            manager.selected.message = 'Could not activate native point transform'
+        _redraw(context.window)
+        return True
 
     def _cancel_interaction(self, context):
         self._pending_pie = False
@@ -724,6 +757,17 @@ class VIEW3D_OT_final_dimensions_ruler(bpy.types.Operator):
             if _remove_ruler(context, index):
                 return {'RUNNING_MODAL'} if manager.items else {'FINISHED'}
             return {'PASS_THROUGH'}
+        if self._swallow_release and event.type == 'LEFTMOUSE' and event.value == 'RELEASE':
+            self._swallow_release = False
+            return {'RUNNING_MODAL'}
+        if (event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.shift
+                and not (event.ctrl or event.alt or event.oskey) and manager.mode == 'IDLE'
+                and not self._native_pie_open
+                and not _native_point_operator_running(context.window)):
+            match = self._near_endpoint(context)
+            if match is not None and self._shift_select(context, match):
+                self._swallow_release = True
+                return {'RUNNING_MODAL'}
         if manager.mode == 'IDLE' and point_edit.active(manager):
             if event.type == 'S' and event.value == 'PRESS' and event.shift and not event.ctrl:
                 self._native_pie_open = True
@@ -974,6 +1018,8 @@ class VIEW3D_OT_final_dimensions_ruler_activate(bpy.types.Operator):
     bl_options = {'INTERNAL'}
 
     endpoint: IntProperty(default=0, min=0, max=1, options={'SKIP_SAVE'})
+    both: BoolProperty(default=False, options={'SKIP_SAVE'},
+                       description='Select both points to move, rotate or scale the ruler as an edge')
 
     def execute(self, context):
         manager = collection(context.window)
@@ -981,9 +1027,10 @@ class VIEW3D_OT_final_dimensions_ruler_activate(bpy.types.Operator):
             return {'CANCELLED'}
         if not manager.activate_endpoint(manager.active, self.endpoint):
             return {'CANCELLED'}
-        hit = getattr(manager.selected, _SLOTS[self.endpoint])
-        if hit is not None and not point_edit.activate(context, manager, manager.active,
-                                                   self.endpoint, _world_hit):
+        slots = (0, 1) if self.both else (self.endpoint,)
+        hits = [getattr(manager.selected, _SLOTS[slot]) for slot in slots]
+        if all(hit is not None for hit in hits) and not point_edit.activate(
+                context, manager, manager.active, self.endpoint, _world_hit, slots):
             manager.selected.message = 'Could not activate native point transform'
         _ensure_listener(context)
         _changed(context)
@@ -1210,6 +1257,22 @@ def _project(hit):
         bpy.context.region, bpy.context.region_data, Vector(hit['point']))
 
 
+def _beside_gizmo(a, b):
+    """Label position beside the line, outside the native gizmo of selected points.
+
+    The gizmo sits on the active point or, for both points, at the middle.
+    """
+    preferences = bpy.context.preferences
+    # Translate arrows reach about 1.6 gizmo sizes from the centre.
+    reach = preferences.view.gizmo_size * preferences.system.ui_scale * 1.7 + 10.
+    normal = Vector((a.y-b.y, b.x-a.x))
+    normal = normal.normalized() if normal.length > 1e-6 else Vector((0., 1.))
+    if normal.y < 0:
+        normal.negate()
+    middle = (a+b)/2 + normal*reach
+    return middle.x+10, middle.y
+
+
 def _marker(projected, color, radius=5.):
     if projected is None:
         return
@@ -1240,13 +1303,19 @@ def _draw_pixel():
                 label = ruler_style.label_text(context.scene, item, index, distance)
                 if first.get('warnings') or second.get('warnings'):
                     label += ' *'
-                overlay._text((a.x+b.x)/2+10, (a.y+b.y)/2+10, label, color)
+                at = ((a.x+b.x)/2+10, (a.y+b.y)/2+10)
+                if selected and point_edit.selected_slots(manager):
+                    at = _beside_gizmo(a, b)
+                overlay._text(*at, label, color)
             if selected:
                 _marker(a, color)
                 _marker(b, color)
                 if manager.active_endpoint is not None:
                     # The white ring marks the active point; a caption here
                     # would cover the distance label of short rulers.
+                    for slot in point_edit.selected_slots(manager):
+                        if slot != manager.active_endpoint:
+                            _marker((a, b)[slot], (1., .6, .2, 1.), 9.)
                     _marker((a, b)[manager.active_endpoint], (1., 1., 1., 1.), 9.)
         item = manager.selected
         if (manager.mode != 'IDLE' and item
@@ -1300,12 +1369,18 @@ def draw_panel(layout, context):
     ruler_style.draw_selected(box, context)
     row = box.row(align=True)
     row.enabled = manager.mode != 'ADD'
+    both = len(point_edit.selected_slots(manager)) == 2
     for slot in (0, 1):
+        chosen = manager.active_endpoint == slot and not both
         op = row.operator(VIEW3D_OT_final_dimensions_ruler_activate.bl_idname,
-                          text=f'Select Point {slot+1}',
-                          depress=manager.active_endpoint == slot,
-                          icon='RADIOBUT_ON' if manager.active_endpoint == slot else 'RADIOBUT_OFF')
+                          text=f'Point {slot+1}', depress=chosen,
+                          icon='RADIOBUT_ON' if chosen else 'RADIOBUT_OFF')
         op.endpoint = slot
+    op = row.operator(VIEW3D_OT_final_dimensions_ruler_activate.bl_idname,
+                      text='Both', depress=both,
+                      icon='RADIOBUT_ON' if both else 'RADIOBUT_OFF')
+    op.endpoint = manager.active_endpoint if manager.active_endpoint is not None else 1
+    op.both = True
     row = box.row(align=True)
     row.enabled = manager.mode != 'ADD'
     for slot, hit in enumerate((state.first, state.second)):
@@ -1322,8 +1397,11 @@ def draw_panel(layout, context):
         box.label(text='Shift+S: 3D Cursor')
         box.operator(VIEW3D_OT_final_dimensions_ruler_to_cursor.bl_idname,
                      text='Point to 3D Cursor', icon='CURSOR')
+    elif both:
+        box.label(text='Both points · G R S · Shift+S · Esc')
     elif manager.active_endpoint is not None:
         box.label(text=f'Active point {manager.active_endpoint+1} · Shift+S · Esc deselect')
+        box.label(text='Shift+click other point: both')
         box.operator(VIEW3D_OT_final_dimensions_ruler_to_cursor.bl_idname,
                      text='Point to 3D Cursor', icon='CURSOR')
     else:

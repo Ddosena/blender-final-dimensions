@@ -1,4 +1,8 @@
-"""One temporary Blender object for native ruler-point transforms and snapping."""
+"""Temporary Blender objects for native ruler-point transforms and snapping.
+
+One Empty stands for each selected endpoint. With both endpoints of a ruler
+selected, native G/R/S, gizmos, pivots and Shift+S treat the ruler like an edge.
+"""
 
 import math
 
@@ -38,11 +42,16 @@ def _view_region(window, area_pointer):
 def active(manager=None):
     session = _session
     return bool(session and (manager is None or session['manager'] is manager)
-                and _alive(session['proxy']))
+                and all(_alive(point['proxy']) for point in session['points'].values()))
 
 
 def proxy(manager=None):
-    return _session['proxy'] if active(manager) else None
+    """The Empty of the active endpoint."""
+    return _session['points'][_session['slot']]['proxy'] if active(manager) else None
+
+
+def selected_slots(manager=None):
+    return tuple(sorted(_session['points'])) if active(manager) else ()
 
 
 def session_window():
@@ -68,29 +77,37 @@ def _restore_mode(session, window):
         pass
 
 
+def _point(hit, helper):
+    return {'proxy': helper, 'original_hit': dict(hit),
+            'baseline': tuple(hit['point']), 'last_point': tuple(hit['point'])}
+
+
 def _apply_position(session):
-    """Commit only a real Empty displacement; retain a mesh anchor on cancel."""
+    """Commit only real Empty displacements; retain a mesh anchor on cancel."""
     manager = session['manager']
-    helper = session['proxy']
-    index, slot = session['index'], session['slot']
-    if not _alive(helper) or not 0 <= index < len(manager.items):
+    index = session['index']
+    if not 0 <= index < len(manager.items):
         return False
     item = manager.items[index]
-    attr = 'first' if slot == 0 else 'second'
-    hit = getattr(item, attr)
-    if hit is None:
-        return False
-    position = tuple(float(v) for v in helper.matrix_world.translation)
-    if math.dist(position, session['last_point']) <= 1e-7:
-        return False
-    if math.dist(position, session['baseline']) <= 1e-7:
-        setattr(item, attr, dict(session['original_hit']))
-    else:
-        setattr(item, attr, session['world_hit'](position))
-    item.errors.pop(slot, None)
-    session['last_point'] = position
-    manager.recalculate()
-    return True
+    changed = False
+    for slot, point in session['points'].items():
+        helper = point['proxy']
+        attr = 'first' if slot == 0 else 'second'
+        if not _alive(helper) or getattr(item, attr) is None:
+            continue
+        position = tuple(float(v) for v in helper.matrix_world.translation)
+        if math.dist(position, point['last_point']) <= 1e-7:
+            continue
+        if math.dist(position, point['baseline']) <= 1e-7:
+            setattr(item, attr, dict(point['original_hit']))
+        else:
+            setattr(item, attr, session['world_hit'](position))
+        item.errors.pop(slot, None)
+        point['last_point'] = position
+        changed = True
+    if changed:
+        manager.recalculate()
+    return changed
 
 
 def stop(restore=True):
@@ -102,7 +119,6 @@ def stop(restore=True):
         return
     _apply_position(session)
     manager = session['manager']
-    proxy_obj = session['proxy']
     window = _window_for(session['window_pointer'])
     for space, values in session['gizmos']:
         try:
@@ -110,11 +126,12 @@ def stop(restore=True):
                 setattr(space, prop, old)
         except ReferenceError:
             pass
-    try:
-        if _alive(proxy_obj):
-            bpy.data.objects.remove(proxy_obj, do_unlink=True)
-    except (ReferenceError, RuntimeError):
-        pass
+    for point in session['points'].values():
+        try:
+            if _alive(point['proxy']):
+                bpy.data.objects.remove(point['proxy'], do_unlink=True)
+        except (ReferenceError, RuntimeError):
+            pass
     if restore:
         layer = session['view_layer']
         try:
@@ -136,23 +153,60 @@ def stop(restore=True):
         pass
 
 
-def activate(context, manager, index, slot, world_hit):
-    """Select a tiny Empty so native G/R/S, gizmos and Shift+S target the point."""
+def _new_proxy(scene, point):
+    helper = bpy.data.objects.new('Final Dimensions Point', None)
+    helper[_TAG] = True
+    helper.empty_display_type = 'PLAIN_AXES'
+    helper.empty_display_size = .015
+    helper.hide_render = True
+    helper.show_in_front = True
+    scene.collection.objects.link(helper)
+    helper.location = point
+    return helper
+
+
+def _select_proxies(session):
+    layer = session['view_layer']
+    # A just-removed proxy can linger as None until the view layer resyncs.
+    for obj in tuple(layer.objects):
+        if obj is not None and obj.select_get(view_layer=layer):
+            obj.select_set(False, view_layer=layer)
+    for point in session['points'].values():
+        point['proxy'].select_set(True, view_layer=layer)
+    layer.objects.active = session['points'][session['slot']]['proxy']
+
+
+def activate(context, manager, index, slot, world_hit, slots=None):
+    """Select tiny Empties so native G/R/S, gizmos and Shift+S target the points.
+
+    ``slot`` is the active endpoint; ``slots`` may add the other endpoint.
+    """
     global _session
-    if not 0 <= index < len(manager.items) or slot not in (0, 1):
+    slots = tuple(sorted(set(slots or (slot,))))
+    if not 0 <= index < len(manager.items) or slot not in slots or not set(slots) <= {0, 1}:
         return False
     item = manager.items[index]
-    hit = item.first if slot == 0 else item.second
-    if hit is None:
+    hits = {part: item.first if part == 0 else item.second for part in slots}
+    if any(hit is None for hit in hits.values()):
         return False
     if active(manager) and _session['window_pointer'] == context.window.as_pointer():
         session = _session
         _apply_position(session)
+        points = session['points']
+        for part in tuple(points):
+            if part not in hits:
+                try:
+                    bpy.data.objects.remove(points.pop(part)['proxy'], do_unlink=True)
+                except (ReferenceError, RuntimeError):
+                    pass
+        for part, hit in hits.items():
+            if part in points:
+                points[part].update(_point(hit, points[part]['proxy']))
+                points[part]['proxy'].location = hit['point']
+            else:
+                points[part] = _point(hit, _new_proxy(session['scene'], hit['point']))
         session['index'], session['slot'] = index, slot
-        session['original_hit'] = dict(hit)
-        session['baseline'] = tuple(hit['point'])
-        session['last_point'] = tuple(hit['point'])
-        session['proxy'].location = hit['point']
+        _select_proxies(session)
         manager.active, manager.active_endpoint = index, slot
         return True
     stop()
@@ -174,19 +228,6 @@ def activate(context, manager, index, slot, world_hit):
                 bpy.ops.object.mode_set(mode='OBJECT')
         except (ValueError, RuntimeError, ReferenceError):
             return False
-    helper = bpy.data.objects.new('Final Dimensions Point', None)
-    helper[_TAG] = True
-    helper.empty_display_type = 'PLAIN_AXES'
-    helper.empty_display_size = .015
-    helper.hide_render = True
-    helper.show_in_front = True
-    scene.collection.objects.link(helper)
-    helper.location = hit['point']
-    for obj in tuple(layer.objects):
-        if obj.select_get(view_layer=layer):
-            obj.select_set(False, view_layer=layer)
-    helper.select_set(True, view_layer=layer)
-    layer.objects.active = helper
     gizmos = []
     space = area.spaces.active
     values = {prop: getattr(space, prop) for prop in _GIZMOS if hasattr(space, prop)}
@@ -195,11 +236,13 @@ def activate(context, manager, index, slot, world_hit):
     gizmos.append((space, values))
     _session = {'manager': manager, 'window_pointer': window.as_pointer(),
                 'scene': scene, 'view_layer': layer, 'area_pointer': area.as_pointer(),
-                'proxy': helper, 'index': index, 'slot': slot,
-                'original_hit': dict(hit), 'baseline': tuple(hit['point']),
-                'last_point': tuple(hit['point']), 'selected_objects': selected,
+                'index': index, 'slot': slot,
+                'points': {part: _point(hit, _new_proxy(scene, hit['point']))
+                           for part, hit in hits.items()},
+                'selected_objects': selected,
                 'active_object': original_active, 'mode': original_mode,
                 'gizmos': gizmos, 'world_hit': world_hit}
+    _select_proxies(_session)
     manager.active, manager.active_endpoint = index, slot
     return True
 
@@ -211,11 +254,12 @@ def sync(window, manager, world_hit=None):
         return False
     if window.as_pointer() != session['window_pointer']:
         return False
-    helper = session['proxy']
-    if not _alive(helper):
+    points = session['points']
+    if not all(_alive(point['proxy']) for point in points.values()):
         stop(restore=True)
         return False
     layer = session['view_layer']
+    helper = points[session['slot']]['proxy']
     if layer.objects.active is helper and not helper.select_get(view_layer=layer):
         # Blender's pie click can leave the active object temporarily unselected.
         helper.select_set(True, view_layer=layer)
@@ -228,19 +272,18 @@ def sync(window, manager, world_hit=None):
         stop(restore=True)
         return False
     item = manager.items[index]
-    attr = 'first' if slot == 0 else 'second'
-    hit = getattr(item, attr)
-    if hit is None:
+    hits = {part: item.first if part == 0 else item.second for part in points}
+    if any(hit is None for hit in hits.values()):
         stop(restore=True)
         return False
     changed = _apply_position(session)
-    if not changed and math.dist(tuple(hit['point']), session['last_point']) > 1e-7:
-        # An attached mesh endpoint moved while no native transform was running.
-        # Follow it without replacing its anchor with a fixed world point.
-        session['original_hit'] = dict(hit)
-        session['baseline'] = tuple(hit['point'])
-        session['last_point'] = tuple(hit['point'])
-        helper.location = hit['point']
+    for part, point in points.items():
+        hit = item.first if part == 0 else item.second
+        if math.dist(tuple(hit['point']), point['last_point']) > 1e-7:
+            # An attached mesh endpoint moved while no native transform was running.
+            # Follow it without replacing its anchor with a fixed world point.
+            point.update(_point(hit, point['proxy']))
+            point['proxy'].location = hit['point']
     return changed
 
 
