@@ -13,7 +13,7 @@ from bpy_extras import view3d_utils
 from gpu_extras.batch import batch_for_shader
 from mathutils import Vector
 
-from . import overlay
+from . import overlay, surface
 from .measure import format_length
 from .section import Geometry, cursor_diameter
 
@@ -205,13 +205,13 @@ class Probe:
                 _redraw(window)
                 return
             # Do not measure the active mesh through another visible object.
-            depsgraph = context.evaluated_depsgraph_get()
-            front = context.scene.ray_cast(depsgraph, origin, direction)
-            if front[0] and front[4] is not None:
-                front_obj = getattr(front[4], 'original', front[4])
+            # A wire/bounds Boolean cutter is an invisible helper, not a blocker.
+            front = surface.ray_through_helpers(context, origin, direction)
+            if front is not None:
+                location, front_obj = front
                 tolerance = max(self.geometry.scale * 1e-5, 1e-7)
                 if (front_obj.as_pointer() != obj.as_pointer()
-                        and (front[1] - origin).length + tolerance
+                        and (location - origin).length + tolerance
                         < (Vector(hit['point']) - origin).length):
                     _results.pop(pointer, None)
                     _redraw(window)

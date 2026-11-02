@@ -82,6 +82,7 @@ def main():
                          '--python', str(ROOT / 'tests/test_install.py')])
     if args.gui:
         for script, prefix in (('test_hover_live', 'hover-live'), ('test_ruler_live', 'ruler-live'),
+                               ('test_boolean_ruler_live', 'boolean-ruler-live'),
                                ('test_multi_ruler_live', 'multi-ruler-live'),
                                ('test_snap_ruler_live', 'snap-ruler-live'),
                                ('test_curve_ruler_live', 'curve-ruler-live'),

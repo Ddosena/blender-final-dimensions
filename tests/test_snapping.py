@@ -333,10 +333,51 @@ def silhouette_pixel_ties_prefer_front():
     close(result['point'], (1,1,-1))
 
 
+def boolean_helpers_are_ignored():
+    clear()
+    canvas = mesh('boolean canvas',
+                  [(-1,-1,-1),(1,-1,-1),(1,1,-1),(-1,1,-1),
+                   (-1,-1,1),(1,-1,1),(1,1,1),(-1,1,1)],
+                  faces=[(0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)])
+    cutter = mesh('boolean cutter',
+                  [(x*.5,y*.5,z*.5+1) for x,y,z in
+                   [(-1,-1,-1),(1,-1,-1),(1,1,-1),(-1,1,-1),
+                    (-1,-1,1),(1,-1,1),(1,1,1),(-1,1,1)]],
+                  faces=[(0,3,2,1),(4,5,6,7),(0,1,5,4),(1,2,6,5),(2,3,7,6),(3,0,4,7)])
+    cutter.display_type = 'BOUNDS'
+    modifier = canvas.modifiers.new('boolean difference', 'BOOLEAN')
+    modifier.operation = 'DIFFERENCE'
+    modifier.object = cutter
+    p = picker()
+    assert all(record['name'] != 'boolean cutter' for record in p.records), p.records
+    # The cutter's top corner shares a pixel with the canvas hole edge. The
+    # visible result must win, and the cutter must not occlude it.
+    vertex = hit(p, (.5,.5,1.5), {'VERTEX'}, 'FINAL')
+    assert vertex and vertex['object_name'] == 'boolean canvas', vertex
+    close(vertex['point'], (.5,.5,1.))
+    face = hit(p, (.3,.3,.4), {'FACE_PROJECT'}, 'FINAL')
+    assert face and face['object_name'] == 'boolean canvas', face
+    close(face['point'], (.3,.3,.5))
+    # A solid cutter is visible geometry and is snapped normally.
+    cutter.display_type = 'TEXTURED'
+    refresh(p)
+    vertex = hit(p, (.5,.5,1.5), {'VERTEX'}, 'FINAL')
+    assert vertex and vertex['object_name'] == 'boolean cutter', vertex
+    close(vertex['point'], (.5,.5,1.5))
+    # A disabled Boolean modifier makes the wire frame an ordinary object.
+    cutter.display_type = 'BOUNDS'
+    modifier.show_viewport = False
+    refresh(p)
+    vertex = hit(p, (.5,.5,1.5), {'VERTEX'}, 'FINAL')
+    assert vertex and vertex['object_name'] == 'boolean cutter', vertex
+    close(vertex['point'], (.5,.5,1.5))
+    clear()
+
+
 for check in (original_final_and_anchors, loose_geometry_and_real_edges,
               perspective_edges_and_clipping, target_filters_and_occlusion,
               live_edit_and_shared_budget, instances_filters_and_cage,
-              silhouette_pixel_ties_prefer_front):
+              silhouette_pixel_ties_prefer_front, boolean_helpers_are_ignored):
     check()
     print('SNAP CHECK', check.__name__, flush=True)
 clear()

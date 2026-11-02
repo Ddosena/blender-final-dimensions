@@ -224,10 +224,79 @@ def check_cache_budget():
     bpy.data.objects.remove(right, do_unlink=True)
 
 
+def check_boolean_helpers():
+    canvas = cube("boolean_canvas", (0, 0, 0))
+    cutter = cube("boolean_cutter", (0, 0, 1))
+    cutter.scale = (.5, .5, .5)
+    cutter.display_type = "BOUNDS"
+    modifier = canvas.modifiers.new("boolean difference", "BOOLEAN")
+    modifier.operation = "DIFFERENCE"
+    modifier.object = cutter
+    update()
+    picker = ScenePicker(bpy.context, 40)
+    names = {record["name"] for record in picker.records}
+    assert "boolean_canvas" in names and "boolean_cutter" not in names, names
+    hit = picker.pick(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert hit and hit["object_name"] == "boolean_canvas", hit
+    close(hit["point"][2], .5)  # floor of the cut, not the cutter's top face
+    front = surface.ray_through_helpers(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert front and front[1].name == "boolean_canvas", front
+    assert front[0][2] <= .5 + 1e-4, front
+    # Wire display is the other Bool Tool cutter mode.
+    cutter.display_type = "WIRE"
+    update()
+    picker.refresh(bpy.context, 41)
+    assert picker.pick(bpy.context, (0, 0, 5), (0, 0, -1))["object_name"] == "boolean_canvas"
+    # A solid operand is visible geometry and stays measurable.
+    cutter.display_type = "TEXTURED"
+    update()
+    picker.refresh(bpy.context, 42)
+    hit = picker.pick(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert hit and hit["object_name"] == "boolean_cutter", hit
+    close(hit["point"][2], 1.5)
+    front = surface.ray_through_helpers(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert front and front[1].name == "boolean_cutter", front
+    # A disabled Boolean modifier makes the wire frame ordinary geometry again.
+    modifier.show_viewport = False
+    cutter.display_type = "BOUNDS"
+    update()
+    picker.refresh(bpy.context, 43)
+    hit = picker.pick(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert hit and hit["object_name"] == "boolean_cutter", hit
+    close(hit["point"][2], 1.5)
+    # A collection operand marks all members as helpers too.
+    cutters = bpy.data.collections.new("boolean_cutters")
+    bpy.context.scene.collection.children.link(cutters)
+    cutters.objects.link(cutter)
+    modifier.operand_type = "COLLECTION"
+    modifier.collection = cutters
+    modifier.object = None
+    modifier.show_viewport = True
+    cutter.display_type = "BOUNDS"
+    update()
+    picker.refresh(bpy.context, 45)
+    names = {record["name"] for record in picker.records}
+    assert "boolean_cutter" not in names, names
+    hit = picker.pick(bpy.context, (0, 0, 5), (0, 0, -1))
+    assert hit and hit["object_name"] == "boolean_canvas", hit
+    close(hit["point"][2], .5)
+    # Only Boolean helpers are skipped; bounds display alone is still measured.
+    lone = cube("bounds_only", (10, 0, 0))
+    lone.display_type = "BOUNDS"
+    update()
+    picker.refresh(bpy.context, 44)
+    hit = picker.pick(bpy.context, (10, 0, 5), (0, 0, -1))
+    assert hit and hit["object_name"] == "bounds_only", hit
+    for obj in (lone, cutter, canvas):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.data.collections.remove(cutters)
+
+
 check_objects_and_anchors()
 check_transformed_bounds()
 check_gn_instance()
 check_edit_warning()
 check_limit_and_cleanup()
 check_cache_budget()
+check_boolean_helpers()
 print("SURFACE PASS", bpy.app.version_string, flush=True)

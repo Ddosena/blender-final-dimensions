@@ -23,6 +23,81 @@ MAX_CACHED_TRIANGLES = 1_400_000
 # Object types whose evaluated result converts with Object.to_mesh(). A curve
 # without bevel or extrusion becomes loose wire edges.
 PICK_TYPES = frozenset({"MESH", "CURVE", "SURFACE", "FONT"})
+# Display types that draw no solid surface. A Boolean cutter can be shown this
+# way (Bool Tool's brush preview) while the evaluated result lives on the
+# canvas, so its hidden triangles must not win a ray or a snap.
+HELPER_DISPLAY_TYPES = frozenset({"WIRE", "BOUNDS"})
+
+
+def boolean_operands(context):
+    """Pointers of objects used by viewport-enabled Boolean modifiers here."""
+    operands = set()
+    try:
+        objects = context.view_layer.objects
+    except (AttributeError, ReferenceError, RuntimeError):
+        return operands
+    for owner in objects:
+        try:
+            modifiers = owner.modifiers
+        except (AttributeError, ReferenceError, RuntimeError):
+            continue
+        for modifier in modifiers:
+            if modifier.type != "BOOLEAN" or not modifier.show_viewport:
+                continue
+            if getattr(modifier, "operand_type", "OBJECT") == "COLLECTION":
+                collection = getattr(modifier, "collection", None)
+                members = getattr(collection, "all_objects", ()) if collection else ()
+            else:
+                operand = modifier.object
+                members = (operand,) if operand is not None else ()
+            for operand in members:
+                try:
+                    operands.add(_original(operand).as_pointer())
+                except (AttributeError, ReferenceError, RuntimeError):
+                    continue
+    return operands
+
+
+def is_boolean_helper(obj, operands):
+    """True for a Boolean operand drawn only as a wire frame or bounds."""
+    try:
+        return (obj.display_type in HELPER_DISPLAY_TYPES
+                and obj.as_pointer() in operands)
+    except (AttributeError, ReferenceError, RuntimeError):
+        return False
+
+
+def ray_through_helpers(context, origin, direction, operands=None, limit=8):
+    """First scene ray hit that is not a wire/bounds Boolean helper.
+
+    The depsgraph keeps a helper's triangles even when the viewport draws only
+    its bounding box, so a plain ``Scene.ray_cast`` reports it as an obstacle.
+    Only the first real hit is returned, as ``(location, original_object)``.
+    """
+    operands = boolean_operands(context) if operands is None else operands
+    start = np.asarray(origin, dtype=np.float64)
+    ray = np.asarray(direction, dtype=np.float64)
+    if (start.shape != (3,) or ray.shape != (3,) or not np.all(np.isfinite(start))
+            or not np.all(np.isfinite(ray))):
+        return None
+    length = float(np.linalg.norm(ray))
+    if length <= 1e-15:
+        return None
+    ray /= length
+    depsgraph = context.evaluated_depsgraph_get()
+    point = start
+    for _ in range(limit):
+        hit, location, _normal, _index, obj, _matrix = context.scene.ray_cast(
+            depsgraph, tuple(point), tuple(ray))
+        if not hit or obj is None:
+            return None
+        original = _original(obj)
+        if not is_boolean_helper(original, operands):
+            return location, original
+        point = np.asarray(location, dtype=np.float64)
+        step = max(float(np.linalg.norm(point-start))*1e-6, 1e-6)
+        point += ray*step
+    return None
 
 
 def _visible(obj, context):
@@ -152,8 +227,11 @@ class ScenePicker:
         warnings_by_owner = {}
         component_cache = {}
         gn_owners = set()
+        operands = boolean_operands(context)
         for obj in context.view_layer.objects:
             if obj.type not in PICK_TYPES or not _visible(obj, context):
+                continue
+            if is_boolean_helper(obj, operands):
                 continue
             pointer = obj.as_pointer()
             visible[pointer] = obj
